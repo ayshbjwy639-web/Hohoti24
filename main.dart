@@ -19,7 +19,7 @@ String newCode() =>
 class Db extends ChangeNotifier {
   static final Db i = Db._();
   Db._();
-  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users'];
+  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings'];
   final Map<String, List<M>> t = {for (final k in keys) k: <M>[]};
   SharedPreferences? p;
   M? me;
@@ -29,6 +29,9 @@ class Db extends ChangeNotifier {
   List<M> get repairs => t['repairs']!;
   List<M> get expenses => t['expenses']!;
   List<M> get users => t['users']!;
+  List<M> get suppliers => t['suppliers']!;
+  List<M> get purchases => t['purchases']!;
+  List<M> get closings => t['closings']!;
 
   Future<void> load() async {
     p = await SharedPreferences.getInstance();
@@ -339,7 +342,25 @@ class MorePage extends StatelessWidget {
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text('الحساب: ${db.me?['name'] ?? ''}')),
         body: ListView(children: [
+          ListTile(
+            leading: const Icon(Icons.lock_clock),
+            title: const Text('إقفال الصندوق اليومي'),
+            onTap: () => Navigator.push(
+                c, MaterialPageRoute(builder: (_) => const CashPage())),
+          ),
           if (isAdmin) ...[
+            ListTile(
+              leading: const Icon(Icons.bar_chart),
+              title: const Text('التقارير'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const ReportsPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.local_shipping),
+              title: const Text('الموردون وفواتير الشراء'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const SuppliersPage())),
+            ),
             ListTile(
               leading: const Icon(Icons.money_off),
               title: const Text('المصروفات'),
@@ -1183,5 +1204,423 @@ class ExpensesPage extends StatelessWidget {
                     ),
                 ]),
         ),
+      );
+}
+
+bool sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+String ds(DateTime d) =>
+    '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+Widget row(String a, String b, {Color? c}) => ListTile(
+    dense: true,
+    title: Text(a),
+    trailing:
+        Text(b, style: TextStyle(fontWeight: FontWeight.bold, color: c)));
+
+class SuppliersPage extends StatelessWidget {
+  const SuppliersPage({super.key});
+
+  Future<void> edit(BuildContext c, [M? m]) async {
+    final r = await form(c, m == null ? 'إضافة مورد' : 'تعديل مورد',
+        ['الاسم', 'الهاتف'], m == null ? null : ['${m['name']}', '${m['phone']}'], {1});
+    if (r == null || r[0].isEmpty) return;
+    final x = m ?? <String, dynamic>{'id': nid(), 'debt': 0.0};
+    x['name'] = r[0];
+    x['phone'] = r[1];
+    if (m == null) db.suppliers.add(x);
+    db.save();
+  }
+
+  Future<void> pay(BuildContext c, M m) async {
+    final r = await form(
+        c, 'تسديد للمورد ${m['name']}', ['المبلغ'], [f(n(m['debt']))], {0});
+    if (r == null) return;
+    final a = pd(r[0]);
+    if (a <= 0) return;
+    final left = n(m['debt']) - a;
+    m['debt'] = left < 0 ? 0.0 : left;
+    db.save();
+  }
+
+  Future<void> purchase(BuildContext c) async {
+    if (db.suppliers.isEmpty || db.products.isEmpty) {
+      msg(c, 'أضف مورداً ومنتجاً أولاً');
+      return;
+    }
+    int? sid = db.suppliers.first['id'] as int;
+    int? pid = db.products.first['id'] as int;
+    final qc = TextEditingController();
+    final cc = TextEditingController();
+    final pc = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: c,
+      builder: (d) => StatefulBuilder(
+        builder: (d, set) => AlertDialog(
+          title: const Text('فاتورة شراء'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              DropdownButton<int?>(
+                isExpanded: true,
+                value: sid,
+                items: [
+                  for (final s in db.suppliers)
+                    DropdownMenuItem<int?>(
+                        value: s['id'] as int, child: Text('${s['name']}'))
+                ],
+                onChanged: (v) => set(() => sid = v),
+              ),
+              DropdownButton<int?>(
+                isExpanded: true,
+                value: pid,
+                items: [
+                  for (final p in db.products)
+                    DropdownMenuItem<int?>(
+                        value: p['id'] as int, child: Text('${p['name']}'))
+                ],
+                onChanged: (v) => set(() => pid = v),
+              ),
+              TextField(
+                  controller: qc,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'الكمية')),
+              TextField(
+                  controller: cc,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'سعر شراء الوحدة (فارغ = الحالي)')),
+              TextField(
+                  controller: pc,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'المدفوع للمورد (فارغ = كامل)')),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('إلغاء')),
+            ElevatedButton(onPressed: () => Navigator.pop(d, true), child: const Text('حفظ')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final q = pd(qc.text).toInt();
+    if (q <= 0) {
+      if (c.mounted) msg(c, 'أدخل كمية صحيحة');
+      return;
+    }
+    final sup = db.suppliers.firstWhere((x) => x['id'] == sid);
+    final p = db.products.firstWhere((x) => x['id'] == pid);
+    final cost = cc.text.trim().isEmpty ? n(p['cost']) : pd(cc.text);
+    final total = cost * q;
+    var paid = pc.text.trim().isEmpty ? total : pd(pc.text);
+    if (paid > total) paid = total;
+    p['qty'] = n(p['qty']).toInt() + q;
+    p['cost'] = cost;
+    sup['debt'] = n(sup['debt']) + (total - paid);
+    db.purchases.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'supplier': sup['name'],
+      'product': p['name'],
+      'qty': q,
+      'cost': cost,
+      'total': total,
+      'paid': paid,
+      'by': db.me?['name'],
+    });
+    db.save();
+    if (c.mounted) msg(c, 'تم تسجيل الشراء وإضافة الكمية للمخزون');
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) => Scaffold(
+          appBar: AppBar(title: const Text('الموردون'), actions: [
+            IconButton(
+                tooltip: 'فاتورة شراء جديدة',
+                icon: const Icon(Icons.add_shopping_cart),
+                onPressed: () => purchase(c)),
+            IconButton(
+                tooltip: 'سجل المشتريات',
+                icon: const Icon(Icons.history),
+                onPressed: () => Navigator.push(c,
+                    MaterialPageRoute(builder: (_) => const PurchasesPage()))),
+          ]),
+          floatingActionButton: FloatingActionButton(
+              onPressed: () => edit(c), child: const Icon(Icons.add)),
+          body: db.suppliers.isEmpty
+              ? empty()
+              : ListView(children: [
+                  for (final m in db.suppliers)
+                    ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.local_shipping)),
+                      title: Text('${m['name']}'),
+                      subtitle: Text('${m['phone']}\nمستحق له: ${f(n(m['debt']))}'),
+                      isThreeLine: true,
+                      onTap: () => edit(c, m),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        if (n(m['debt']) > 0)
+                          IconButton(
+                              icon: const Icon(Icons.payments, color: Colors.green),
+                              onPressed: () => pay(c, m)),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () async {
+                            if (await sure(c)) {
+                              db.suppliers.remove(m);
+                              db.save();
+                            }
+                          },
+                        ),
+                      ]),
+                    ),
+                ]),
+        ),
+      );
+}
+
+class PurchasesPage extends StatelessWidget {
+  const PurchasesPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final list = db.purchases.reversed.toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('سجل المشتريات')),
+      body: list.isEmpty
+          ? empty()
+          : ListView(children: [
+              for (final p in list)
+                ListTile(
+                  title: Text('${p['product']} × ${p['qty']}'),
+                  subtitle: Text(
+                      '${p['supplier']} • ${(p['date'] as String).substring(0, 10)}\nالمدفوع ${f(n(p['paid']))}'),
+                  isThreeLine: true,
+                  trailing: Text(f(n(p['total'])),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                ),
+            ]),
+    );
+  }
+}
+
+class ReportsPage extends StatefulWidget {
+  const ReportsPage({super.key});
+  @override
+  State<ReportsPage> createState() => _ReportsState();
+}
+
+class _ReportsState extends State<ReportsPage> {
+  late DateTime from;
+  late DateTime to;
+  int mode = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    setRange(0);
+  }
+
+  void setRange(int m) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    mode = m;
+    if (m == 0) {
+      from = today;
+    } else if (m == 1) {
+      from = today.subtract(const Duration(days: 6));
+    } else {
+      from = DateTime(now.year, now.month, 1);
+    }
+    to = today;
+  }
+
+  Future<void> pick() async {
+    final r = await showDateRangePicker(
+        context: context,
+        firstDate: DateTime(2020),
+        lastDate: DateTime.now().add(const Duration(days: 1)));
+    if (r == null) return;
+    setState(() {
+      mode = 3;
+      from = DateTime(r.start.year, r.start.month, r.start.day);
+      to = DateTime(r.end.year, r.end.month, r.end.day);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final end = to.add(const Duration(days: 1));
+    bool inR(String s) {
+      final d = DateTime.parse(s);
+      return !d.isBefore(from) && d.isBefore(end);
+    }
+
+    final ss = db.sales.where((s) => inR(s['date'] as String)).toList();
+    double total = 0, profit = 0, disc = 0, debt = 0;
+    final qty = <String, double>{};
+    final emp = <String, double>{};
+    for (final s in ss) {
+      total += n(s['total']);
+      profit += n(s['profit']);
+      disc += n(s['discount']);
+      debt += n(s['debt']);
+      for (final i in s['items'] as List) {
+        final k = '${i['name']}';
+        qty[k] = (qty[k] ?? 0) + n(i['qty']);
+      }
+      final e = '${s['by'] ?? '-'}';
+      emp[e] = (emp[e] ?? 0) + n(s['total']);
+    }
+    final exp = db.expenses
+        .where((e) => inR(e['date'] as String))
+        .fold<double>(0, (a, e) => a + n(e['amount']));
+    final buy = db.purchases
+        .where((e) => inR(e['date'] as String))
+        .fold<double>(0, (a, e) => a + n(e['total']));
+    final top = qty.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    const labels = ['اليوم', 'آخر 7 أيام', 'هذا الشهر'];
+    return Scaffold(
+      appBar: AppBar(title: const Text('التقارير')),
+      body: ListView(padding: const EdgeInsets.all(8), children: [
+        Wrap(spacing: 8, children: [
+          for (var i = 0; i < 3; i++)
+            ChoiceChip(
+                label: Text(labels[i]),
+                selected: mode == i,
+                onSelected: (_) => setState(() => setRange(i))),
+          ChoiceChip(label: const Text('مخصص'), selected: mode == 3, onSelected: (_) => pick()),
+        ]),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text('من ${ds(from)} إلى ${ds(to)}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+        ),
+        Card(
+          child: Column(children: [
+            row('عدد الفواتير', '${ss.length}'),
+            row('إجمالي المبيعات', f(total)),
+            row('ربح المبيعات', f(profit), c: Colors.green),
+            row('الخصومات', f(disc)),
+            row('ديون جديدة على العملاء', f(debt), c: Colors.deepOrange),
+            row('المصروفات', f(exp), c: Colors.red),
+            row('صافي الربح (الربح - المصروفات)', f(profit - exp), c: Colors.purple),
+            row('مشتريات بضاعة (للعلم)', f(buy)),
+          ]),
+        ),
+        const Padding(
+            padding: EdgeInsets.all(8),
+            child: Text('الأكثر مبيعاً', style: TextStyle(fontWeight: FontWeight.bold))),
+        Card(
+          child: Column(children: [
+            if (top.isEmpty) const ListTile(title: Text('لا توجد مبيعات')),
+            for (final e in top.take(5)) row(e.key, 'الكمية ${f(e.value)}'),
+          ]),
+        ),
+        const Padding(
+            padding: EdgeInsets.all(8),
+            child: Text('المبيعات حسب الموظف', style: TextStyle(fontWeight: FontWeight.bold))),
+        Card(
+          child: Column(children: [
+            if (emp.isEmpty) const ListTile(title: Text('لا توجد مبيعات')),
+            for (final e in emp.entries) row(e.key, f(e.value)),
+          ]),
+        ),
+        const Padding(
+            padding: EdgeInsets.all(8),
+            child: Text('ملاحظة: دخل الصيانة غير مشمول في هذا التقرير.',
+                style: TextStyle(color: Colors.grey))),
+      ]),
+    );
+  }
+}
+
+class CashPage extends StatelessWidget {
+  const CashPage({super.key});
+
+  double expected() {
+    final now = DateTime.now();
+    double e = 0;
+    for (final s in db.sales) {
+      if (s['by'] == db.me?['name'] && sameDay(DateTime.parse(s['date'] as String), now)) {
+        e += n(s['paid']);
+      }
+    }
+    return e;
+  }
+
+  Future<void> close(BuildContext c) async {
+    final e = expected();
+    final r = await form(c, 'إقفال الصندوق - المتوقع ${f(e)}',
+        ['المبلغ الموجود فعلياً في الدرج'], null, {0});
+    if (r == null || r[0].isEmpty) return;
+    final act = pd(r[0]);
+    db.closings.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'by': db.me?['name'],
+      'expected': e,
+      'actual': act,
+      'diff': act - e,
+    });
+    db.save();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) {
+          final list = db.closings
+              .where((x) => isAdmin || x['by'] == db.me?['name'])
+              .toList()
+              .reversed
+              .toList();
+          return Scaffold(
+            appBar: AppBar(title: const Text('إقفال الصندوق اليومي')),
+            body: ListView(padding: const EdgeInsets.all(8), children: [
+              Card(
+                child: Column(children: [
+                  row('الموظف', '${db.me?['name']}'),
+                  row('المتوقع في الدرج اليوم (المدفوع نقداً)', f(expected())),
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: ElevatedButton.icon(
+                        onPressed: () => close(c),
+                        icon: const Icon(Icons.lock_clock),
+                        label: const Text('إقفال الصندوق')),
+                  ),
+                ]),
+              ),
+              const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Text('سجل الإقفالات', style: TextStyle(fontWeight: FontWeight.bold))),
+              if (list.isEmpty) empty(),
+              for (final x in list)
+                ListTile(
+                  title: Text(
+                      '${x['by']} • ${(x['date'] as String).substring(0, 16).replaceFirst('T', ' ')}'),
+                  subtitle: Text(
+                      'المتوقع ${f(n(x['expected']))} | الفعلي ${f(n(x['actual']))}'),
+                  trailing: Text(
+                    n(x['diff']) == 0
+                        ? 'مطابق'
+                        : n(x['diff']) > 0
+                            ? 'زيادة ${f(n(x['diff']))}'
+                            : 'عجز ${f(-n(x['diff']))}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: n(x['diff']) == 0
+                            ? Colors.green
+                            : n(x['diff']) > 0
+                                ? Colors.blue
+                                : Colors.red),
+                  ),
+                ),
+            ]),
+          );
+        },
       );
 }
