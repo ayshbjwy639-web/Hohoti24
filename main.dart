@@ -1,5 +1,10 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 typedef M = Map<String, dynamic>;
@@ -8,18 +13,22 @@ double n(dynamic v) => v is num ? v.toDouble() : 0.0;
 double pd(String s) => double.tryParse(s.replaceAll(',', '').trim()) ?? 0.0;
 String f(num v) => v.toStringAsFixed(v % 1 == 0 ? 0 : 2);
 int nid() => DateTime.now().microsecondsSinceEpoch;
+String newCode() =>
+    (DateTime.now().millisecondsSinceEpoch % 1000000000000).toString().padLeft(12, '0');
 
 class Db extends ChangeNotifier {
   static final Db i = Db._();
   Db._();
-  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses'];
+  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users'];
   final Map<String, List<M>> t = {for (final k in keys) k: <M>[]};
   SharedPreferences? p;
+  M? me;
   List<M> get products => t['products']!;
   List<M> get customers => t['customers']!;
   List<M> get sales => t['sales']!;
   List<M> get repairs => t['repairs']!;
   List<M> get expenses => t['expenses']!;
+  List<M> get users => t['users']!;
 
   Future<void> load() async {
     p = await SharedPreferences.getInstance();
@@ -39,12 +48,42 @@ class Db extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  void logout() {
+    me = null;
+    notifyListeners();
+  }
+
+  String export() => jsonEncode(t);
+
+  bool restore(String s) {
+    try {
+      final d = jsonDecode(s) as Map;
+      final nt = <String, List<M>>{};
+      for (final k in keys) {
+        if (d[k] is List) {
+          nt[k] = (d[k] as List)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+        }
+      }
+      if (nt.isEmpty) return false;
+      t.addAll(nt);
+      me = null;
+      save();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 final db = Db.i;
+bool get isAdmin => db.me?['role'] == 'admin';
 
 Future<List<String>?> form(BuildContext c, String title, List<String> labels,
-    List<String>? init, Set<int> nums) {
+    List<String>? init, Set<int> nums,
+    {int? scanIdx}) {
   final cs = List.generate(labels.length,
       (i) => TextEditingController(text: init != null ? init[i] : ''));
   return showDialog<List<String>>(
@@ -56,7 +95,17 @@ Future<List<String>?> form(BuildContext c, String title, List<String> labels,
           for (var i = 0; i < labels.length; i++)
             TextField(
               controller: cs[i],
-              decoration: InputDecoration(labelText: labels[i]),
+              decoration: InputDecoration(
+                labelText: labels[i],
+                suffixIcon: i == scanIdx
+                    ? IconButton(
+                        icon: const Icon(Icons.qr_code_scanner),
+                        onPressed: () async {
+                          final v = await scan(c);
+                          if (v != null) cs[i].text = v;
+                        })
+                    : null,
+              ),
               keyboardType:
                   nums.contains(i) ? TextInputType.number : TextInputType.text,
             ),
@@ -73,11 +122,11 @@ Future<List<String>?> form(BuildContext c, String title, List<String> labels,
   );
 }
 
-Future<bool> sure(BuildContext c) async =>
+Future<bool> ask(BuildContext c, String t) async =>
     await showDialog<bool>(
       context: c,
       builder: (d) => AlertDialog(
-        title: const Text('تأكيد الحذف؟'),
+        title: Text(t),
         actions: [
           TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('لا')),
           TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('نعم')),
@@ -86,10 +135,62 @@ Future<bool> sure(BuildContext c) async =>
     ) ??
     false;
 
+Future<bool> sure(BuildContext c) => ask(c, 'تأكيد الحذف؟');
+
 void msg(BuildContext c, String s) =>
     ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(s)));
 
 Widget empty() => const Center(child: Text('لا توجد بيانات'));
+
+Future<String?> scan(BuildContext c) => Navigator.push<String>(
+    c, MaterialPageRoute(builder: (_) => const ScanPage()));
+
+class ScanPage extends StatefulWidget {
+  const ScanPage({super.key});
+  @override
+  State<ScanPage> createState() => _ScanState();
+}
+
+class _ScanState extends State<ScanPage> {
+  bool done = false;
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('وجّه الكاميرا نحو الباركود')),
+        body: MobileScanner(onDetect: (cap) {
+          if (done) return;
+          final v = cap.barcodes.isEmpty ? null : cap.barcodes.first.rawValue;
+          if (v == null || v.isEmpty) return;
+          done = true;
+          Navigator.pop(context, v);
+        }),
+      );
+}
+
+Future<void> printLabels(BuildContext c, M p) async {
+  final r = await form(c, 'طباعة ملصق باركود', ['عدد الملصقات'], ['1'], {0});
+  if (r == null) return;
+  var cnt = pd(r[0]).toInt();
+  if (cnt < 1) cnt = 1;
+  if (cnt > 200) cnt = 200;
+  final doc = pw.Document();
+  final fmt = PdfPageFormat(50 * PdfPageFormat.mm, 30 * PdfPageFormat.mm,
+      marginAll: 2 * PdfPageFormat.mm);
+  for (var i = 0; i < cnt; i++) {
+    doc.addPage(pw.Page(
+      pageFormat: fmt,
+      build: (_) => pw.Column(children: [
+        pw.Expanded(
+            child: pw.BarcodeWidget(
+                barcode: pw.Barcode.code128(),
+                data: '${p['imei']}',
+                drawText: true)),
+        pw.Text(f(n(p['price'])),
+            style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
+      ]),
+    ));
+  }
+  await Printing.layoutPdf(onLayout: (_) async => doc.save(), name: 'labels');
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -106,7 +207,91 @@ class App extends StatelessWidget {
         theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
         builder: (c, w) =>
             Directionality(textDirection: TextDirection.rtl, child: w!),
-        home: const Home(),
+        home: const Gate(),
+      );
+}
+
+class Gate extends StatelessWidget {
+  const Gate({super.key});
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) {
+          if (db.users.isEmpty) return const AuthPage(true);
+          if (db.me == null) return const AuthPage(false);
+          return Home(key: ValueKey(db.me!['id']));
+        },
+      );
+}
+
+class AuthPage extends StatefulWidget {
+  final bool setup;
+  const AuthPage(this.setup, {super.key});
+  @override
+  State<AuthPage> createState() => _AuthState();
+}
+
+class _AuthState extends State<AuthPage> {
+  final nm = TextEditingController();
+  final us = TextEditingController();
+  final ps = TextEditingController();
+
+  void go() {
+    final u = us.text.trim();
+    if (widget.setup) {
+      if (nm.text.trim().isEmpty || u.isEmpty || ps.text.length < 4) {
+        msg(context, 'أكمل البيانات (كلمة المرور 4 أحرف على الأقل)');
+        return;
+      }
+      final m = <String, dynamic>{
+        'id': nid(),
+        'name': nm.text.trim(),
+        'user': u,
+        'pass': ps.text,
+        'role': 'admin'
+      };
+      db.users.add(m);
+      db.me = m;
+      db.save();
+    } else {
+      final l = db.users.where((x) => x['user'] == u && x['pass'] == ps.text).toList();
+      if (l.isEmpty) {
+        msg(context, 'بيانات الدخول غير صحيحة');
+        return;
+      }
+      db.me = l.first;
+      db.save();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(children: [
+              const Icon(Icons.phone_android, size: 72, color: Colors.indigo),
+              const SizedBox(height: 8),
+              Text(widget.setup ? 'إنشاء حساب المدير (صاحب المحل)' : 'تسجيل الدخول',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              if (widget.setup)
+                TextField(
+                    controller: nm,
+                    decoration: const InputDecoration(labelText: 'الاسم')),
+              TextField(
+                  controller: us,
+                  decoration: const InputDecoration(labelText: 'اسم المستخدم')),
+              TextField(
+                  controller: ps,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'كلمة المرور')),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                  onPressed: go, child: Text(widget.setup ? 'إنشاء ودخول' : 'دخول')),
+            ]),
+          ),
+        ),
       );
 }
 
@@ -119,26 +304,192 @@ class Home extends StatefulWidget {
 class _HomeState extends State<Home> {
   int i = 0;
   @override
-  Widget build(BuildContext context) => Scaffold(
-        body: IndexedStack(index: i, children: const [
-          Dash(),
-          ProductsPage(),
-          PosPage(),
-          CustomersPage(),
-          RepairsPage(),
-          ExpensesPage(),
-        ]),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: i,
-          onDestinationSelected: (v) => setState(() => i = v),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.dashboard), label: 'الرئيسية'),
-            NavigationDestination(icon: Icon(Icons.phone_android), label: 'المخزون'),
-            NavigationDestination(icon: Icon(Icons.point_of_sale), label: 'البيع'),
-            NavigationDestination(icon: Icon(Icons.people), label: 'العملاء'),
-            NavigationDestination(icon: Icon(Icons.build), label: 'الصيانة'),
-            NavigationDestination(icon: Icon(Icons.money_off), label: 'المصروفات'),
+  Widget build(BuildContext context) {
+    final a = isAdmin;
+    final pages = <Widget>[
+      if (a) const Dash(),
+      const ProductsPage(),
+      const PosPage(),
+      const CustomersPage(),
+      const RepairsPage(),
+      const MorePage(),
+    ];
+    final dest = <NavigationDestination>[
+      if (a) const NavigationDestination(icon: Icon(Icons.dashboard), label: 'الرئيسية'),
+      const NavigationDestination(icon: Icon(Icons.phone_android), label: 'المخزون'),
+      const NavigationDestination(icon: Icon(Icons.point_of_sale), label: 'البيع'),
+      const NavigationDestination(icon: Icon(Icons.people), label: 'العملاء'),
+      const NavigationDestination(icon: Icon(Icons.build), label: 'الصيانة'),
+      const NavigationDestination(icon: Icon(Icons.more_horiz), label: 'المزيد'),
+    ];
+    return Scaffold(
+      body: IndexedStack(index: i, children: pages),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: i,
+        onDestinationSelected: (v) => setState(() => i = v),
+        destinations: dest,
+      ),
+    );
+  }
+}
+
+class MorePage extends StatelessWidget {
+  const MorePage({super.key});
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text('الحساب: ${db.me?['name'] ?? ''}')),
+        body: ListView(children: [
+          if (isAdmin) ...[
+            ListTile(
+              leading: const Icon(Icons.money_off),
+              title: const Text('المصروفات'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const ExpensesPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.manage_accounts),
+              title: const Text('إدارة الحسابات'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const UsersPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.backup),
+              title: const Text('نسخ احتياطي'),
+              subtitle: const Text('ينسخ كل البيانات، الصقها في واتساب أو ملاحظات'),
+              onTap: () async {
+                await Clipboard.setData(ClipboardData(text: db.export()));
+                if (c.mounted) msg(c, 'تم نسخ البيانات، الصقها في مكان آمن');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.restore),
+              title: const Text('استعادة نسخة احتياطية'),
+              onTap: () async {
+                final tc = TextEditingController();
+                final ok = await showDialog<bool>(
+                  context: c,
+                  builder: (d) => AlertDialog(
+                    title: const Text('الصق النسخة (ستستبدل البيانات الحالية)'),
+                    content: TextField(controller: tc, maxLines: 5),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(d, false),
+                          child: const Text('إلغاء')),
+                      ElevatedButton(
+                          onPressed: () => Navigator.pop(d, true),
+                          child: const Text('استعادة')),
+                    ],
+                  ),
+                );
+                if (ok != true) return;
+                final done = db.restore(tc.text.trim());
+                if (!done && c.mounted) msg(c, 'النسخة غير صالحة');
+              },
+            ),
           ],
+          ListTile(
+            leading: const Icon(Icons.logout, color: Colors.red),
+            title: const Text('تسجيل الخروج'),
+            onTap: () => db.logout(),
+          ),
+        ]),
+      );
+}
+
+class UsersPage extends StatelessWidget {
+  const UsersPage({super.key});
+
+  Future<void> add(BuildContext c) async {
+    final nm = TextEditingController();
+    final us = TextEditingController();
+    final ps = TextEditingController();
+    var adm = false;
+    final ok = await showDialog<bool>(
+      context: c,
+      builder: (d) => StatefulBuilder(
+        builder: (d, set) => AlertDialog(
+          title: const Text('إضافة حساب'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: nm,
+                  decoration: const InputDecoration(labelText: 'الاسم')),
+              TextField(
+                  controller: us,
+                  decoration: const InputDecoration(labelText: 'اسم المستخدم')),
+              TextField(
+                  controller: ps,
+                  decoration: const InputDecoration(labelText: 'كلمة المرور')),
+              SwitchListTile(
+                  title: const Text('صلاحية مدير'),
+                  value: adm,
+                  onChanged: (v) => set(() => adm = v)),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(d, false), child: const Text('إلغاء')),
+            ElevatedButton(
+                onPressed: () => Navigator.pop(d, true), child: const Text('حفظ')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final u = us.text.trim();
+    if (u.isEmpty || ps.text.length < 4 || nm.text.trim().isEmpty) {
+      if (c.mounted) msg(c, 'أكمل البيانات (كلمة المرور 4 أحرف على الأقل)');
+      return;
+    }
+    if (db.users.any((x) => x['user'] == u)) {
+      if (c.mounted) msg(c, 'اسم المستخدم مستخدم مسبقاً');
+      return;
+    }
+    db.users.add({
+      'id': nid(),
+      'name': nm.text.trim(),
+      'user': u,
+      'pass': ps.text,
+      'role': adm ? 'admin' : 'staff'
+    });
+    db.save();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) => Scaffold(
+          appBar: AppBar(title: const Text('إدارة الحسابات')),
+          floatingActionButton: FloatingActionButton(
+              onPressed: () => add(c), child: const Icon(Icons.person_add)),
+          body: ListView(children: [
+            for (final u in db.users)
+              ListTile(
+                leading: Icon(u['role'] == 'admin'
+                    ? Icons.admin_panel_settings
+                    : Icons.person),
+                title: Text('${u['name']} (${u['user']})'),
+                subtitle: Text(u['role'] == 'admin' ? 'مدير' : 'موظف مبيعات'),
+                onTap: () async {
+                  final r = await form(
+                      c, 'كلمة مرور جديدة', ['كلمة المرور'], null, {});
+                  if (r == null || r[0].length < 4) return;
+                  u['pass'] = r[0];
+                  db.save();
+                },
+                trailing: u['id'] == db.me?['id']
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () async {
+                          if (await sure(c)) {
+                            db.users.remove(u);
+                            db.save();
+                          }
+                        },
+                      ),
+              ),
+          ]),
         ),
       );
 }
@@ -240,7 +591,7 @@ class _ProductsState extends State<ProductsPage> {
     final r = await form(
       context,
       p == null ? 'إضافة منتج' : 'تعديل منتج',
-      ['الاسم', 'التصنيف', 'IMEI / باركود', 'سعر الشراء', 'سعر البيع', 'الكمية'],
+      ['الاسم', 'التصنيف', 'الباركود / IMEI (فارغ = توليد تلقائي)', 'سعر الشراء', 'سعر البيع', 'الكمية'],
       p == null
           ? null
           : [
@@ -252,17 +603,23 @@ class _ProductsState extends State<ProductsPage> {
               f(n(p['qty']))
             ],
       {3, 4, 5},
+      scanIdx: 2,
     );
     if (r == null || r[0].isEmpty) return;
     final m = p ?? <String, dynamic>{'id': nid()};
     m['name'] = r[0];
     m['cat'] = r[1];
-    m['imei'] = r[2];
+    m['imei'] = r[2].isEmpty ? newCode() : r[2];
     m['cost'] = pd(r[3]);
     m['price'] = pd(r[4]);
     m['qty'] = pd(r[5]).toInt();
     if (p == null) db.products.add(m);
     db.save();
+    if (p == null && mounted) {
+      if (await ask(context, 'طباعة ملصق باركود لهذا المنتج الآن؟') && mounted) {
+        await printLabels(context, m);
+      }
+    }
   }
 
   @override
@@ -274,17 +631,20 @@ class _ProductsState extends State<ProductsPage> {
                   .toLowerCase()
                   .contains(q.toLowerCase()))
               .toList();
+          final a = isAdmin;
           return Scaffold(
             appBar: AppBar(title: const Text('المخزون')),
-            floatingActionButton: FloatingActionButton(
-                onPressed: () => edit(), child: const Icon(Icons.add)),
+            floatingActionButton: a
+                ? FloatingActionButton(
+                    onPressed: () => edit(), child: const Icon(Icons.add))
+                : null,
             body: Column(children: [
               Padding(
                 padding: const EdgeInsets.all(8),
                 child: TextField(
                   decoration: const InputDecoration(
                       prefixIcon: Icon(Icons.search),
-                      hintText: 'بحث بالاسم أو IMEI',
+                      hintText: 'بحث بالاسم أو الباركود',
                       border: OutlineInputBorder()),
                   onChanged: (v) => setState(() => q = v),
                 ),
@@ -304,17 +664,25 @@ class _ProductsState extends State<ProductsPage> {
                             ),
                             title: Text('${p['name']}'),
                             subtitle: Text(
-                                '${p['cat']} • IMEI: ${p['imei']}\nشراء ${f(n(p['cost']))} | بيع ${f(n(p['price']))}'),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () async {
-                                if (await sure(c)) {
-                                  db.products.remove(p);
-                                  db.save();
-                                }
-                              },
-                            ),
-                            onTap: () => edit(p),
+                                '${p['cat']} • ${p['imei']}\n${a ? 'شراء ${f(n(p['cost']))} | ' : ''}بيع ${f(n(p['price']))}'),
+                            trailing: a
+                                ? Row(mainAxisSize: MainAxisSize.min, children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.qr_code_2),
+                                      onPressed: () => printLabels(c, p),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete, color: Colors.red),
+                                      onPressed: () async {
+                                        if (await sure(c)) {
+                                          db.products.remove(p);
+                                          db.save();
+                                        }
+                                      },
+                                    ),
+                                  ])
+                                : null,
+                            onTap: a ? () => edit(p) : null,
                           ),
                       ]),
               ),
@@ -333,11 +701,29 @@ class PosPage extends StatefulWidget {
 class _PosState extends State<PosPage> {
   String q = '';
   final Map<int, int> cart = {};
+  final qc = TextEditingController();
+  final fn = FocusNode();
 
   M prod(int id) => db.products.firstWhere((p) => p['id'] == id);
 
   double get sub =>
       cart.entries.fold<double>(0, (a, e) => a + n(prod(e.key)['price']) * e.value);
+
+  void addByCode(String v) {
+    final code = v.trim();
+    if (code.isEmpty) return;
+    final l = db.products.where((p) => '${p['imei']}' == code).toList();
+    if (l.isEmpty) {
+      msg(context, 'لا يوجد منتج بهذا الباركود');
+      return;
+    }
+    final id = l.first['id'] as int;
+    if ((cart[id] ?? 0) >= n(l.first['qty'])) {
+      msg(context, 'الكمية المتوفرة لا تكفي');
+      return;
+    }
+    setState(() => cart[id] = (cart[id] ?? 0) + 1);
+  }
 
   Future<void> checkout() async {
     if (cart.isEmpty) return;
@@ -398,6 +784,7 @@ class _PosState extends State<PosPage> {
       final p = prod(e.key);
       cost += n(p['cost']) * e.value;
       items.add({
+        'pid': p['id'],
         'name': p['name'],
         'qty': e.value,
         'price': n(p['price']),
@@ -415,6 +802,8 @@ class _PosState extends State<PosPage> {
       'id': nid(),
       'date': DateTime.now().toIso8601String(),
       'customer': cname,
+      'cid': cid,
+      'by': db.me?['name'],
       'items': items,
       'total': total,
       'discount': dsc,
@@ -452,11 +841,27 @@ class _PosState extends State<PosPage> {
               Padding(
                 padding: const EdgeInsets.all(8),
                 child: TextField(
-                  decoration: const InputDecoration(
-                      prefixIcon: Icon(Icons.search),
-                      hintText: 'بحث عن منتج',
-                      border: OutlineInputBorder()),
+                  controller: qc,
+                  focusNode: fn,
+                  decoration: InputDecoration(
+                    prefixIcon: const Icon(Icons.search),
+                    hintText: 'ابحث أو امسح الباركود (قارئ/كاميرا)',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.qr_code_scanner),
+                      onPressed: () async {
+                        final v = await scan(c);
+                        if (v != null) addByCode(v);
+                      },
+                    ),
+                  ),
                   onChanged: (v) => setState(() => q = v),
+                  onSubmitted: (v) {
+                    addByCode(v);
+                    qc.clear();
+                    setState(() => q = '');
+                    fn.requestFocus();
+                  },
                 ),
               ),
               Expanded(
@@ -518,44 +923,77 @@ class _PosState extends State<PosPage> {
 
 class SalesPage extends StatelessWidget {
   const SalesPage({super.key});
-  @override
-  Widget build(BuildContext context) {
-    final list = db.sales.reversed.toList();
-    return Scaffold(
-      appBar: AppBar(title: const Text('سجل المبيعات')),
-      body: list.isEmpty
-          ? empty()
-          : ListView(children: [
-              for (final s in list)
-                ListTile(
-                  title: Text('${s['customer']} - ${f(n(s['total']))}'),
-                  subtitle: Text((s['date'] as String)
-                      .substring(0, 16)
-                      .replaceFirst('T', ' ')),
-                  trailing: n(s['debt']) > 0
-                      ? Text('دين ${f(n(s['debt']))}',
-                          style: const TextStyle(color: Colors.red))
-                      : const Icon(Icons.check_circle, color: Colors.green),
-                  onTap: () => showDialog<void>(
-                    context: context,
-                    builder: (d) => AlertDialog(
-                      title: const Text('تفاصيل الفاتورة'),
-                      content: Text((s['items'] as List)
-                              .map((i) =>
-                                  '${i['name']} × ${i['qty']} = ${f(n(i['price']) * n(i['qty']))}')
-                              .join('\n') +
-                          '\n\nالخصم: ${f(n(s['discount']))}\nالإجمالي: ${f(n(s['total']))}\nالمدفوع: ${f(n(s['paid']))}\nالمتبقي: ${f(n(s['debt']))}'),
-                      actions: [
-                        TextButton(
-                            onPressed: () => Navigator.pop(d),
-                            child: const Text('إغلاق'))
-                      ],
-                    ),
-                  ),
-                ),
-            ]),
-    );
+
+  Future<void> returnSale(BuildContext c, M s) async {
+    if (!await ask(c, 'إرجاع الفاتورة بالكامل؟ ستعود الكميات للمخزون')) return;
+    for (final i in s['items'] as List) {
+      final l = db.products
+          .where((p) =>
+              p['id'] == i['pid'] || (i['pid'] == null && p['name'] == i['name']))
+          .toList();
+      if (l.isNotEmpty) {
+        l.first['qty'] = n(l.first['qty']).toInt() + n(i['qty']).toInt();
+      }
+    }
+    if (s['cid'] != null) {
+      final l = db.customers.where((x) => x['id'] == s['cid']).toList();
+      if (l.isNotEmpty) {
+        final left = n(l.first['debt']) - n(s['debt']);
+        l.first['debt'] = left < 0 ? 0.0 : left;
+      }
+    }
+    db.sales.remove(s);
+    db.save();
   }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) {
+          final list = db.sales.reversed.toList();
+          return Scaffold(
+            appBar: AppBar(title: const Text('سجل المبيعات')),
+            body: list.isEmpty
+                ? empty()
+                : ListView(children: [
+                    for (final s in list)
+                      ListTile(
+                        title: Text('${s['customer']} - ${f(n(s['total']))}'),
+                        subtitle: Text(
+                            '${(s['date'] as String).substring(0, 16).replaceFirst('T', ' ')} • ${s['by'] ?? ''}'),
+                        trailing: n(s['debt']) > 0
+                            ? Text('دين ${f(n(s['debt']))}',
+                                style: const TextStyle(color: Colors.red))
+                            : const Icon(Icons.check_circle, color: Colors.green),
+                        onTap: () => showDialog<void>(
+                          context: c,
+                          builder: (d) => AlertDialog(
+                            title: const Text('تفاصيل الفاتورة'),
+                            content: Text((s['items'] as List)
+                                    .map((i) =>
+                                        '${i['name']} × ${i['qty']} = ${f(n(i['price']) * n(i['qty']))}')
+                                    .join('\n') +
+                                '\n\nالخصم: ${f(n(s['discount']))}\nالإجمالي: ${f(n(s['total']))}\nالمدفوع: ${f(n(s['paid']))}\nالمتبقي: ${f(n(s['debt']))}'),
+                            actions: [
+                              if (isAdmin)
+                                TextButton(
+                                    onPressed: () {
+                                      Navigator.pop(d);
+                                      returnSale(c, s);
+                                    },
+                                    child: const Text('إرجاع الفاتورة',
+                                        style: TextStyle(color: Colors.red))),
+                              TextButton(
+                                  onPressed: () => Navigator.pop(d),
+                                  child: const Text('إغلاق')),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ]),
+          );
+        },
+      );
 }
 
 class CustomersPage extends StatelessWidget {
@@ -601,8 +1039,7 @@ class CustomersPage extends StatelessWidget {
                     ListTile(
                       leading: const CircleAvatar(child: Icon(Icons.person)),
                       title: Text('${m['name']}'),
-                      subtitle: Text(
-                          '${m['phone']}\nالدين: ${f(n(m['debt']))}'),
+                      subtitle: Text('${m['phone']}\nالدين: ${f(n(m['debt']))}'),
                       isThreeLine: true,
                       onTap: () => edit(c, m),
                       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -610,15 +1047,16 @@ class CustomersPage extends StatelessWidget {
                           IconButton(
                               icon: const Icon(Icons.payments, color: Colors.green),
                               onPressed: () => pay(c, m)),
-                        IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () async {
-                            if (await sure(c)) {
-                              db.customers.remove(m);
-                              db.save();
-                            }
-                          },
-                        ),
+                        if (isAdmin)
+                          IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () async {
+                              if (await sure(c)) {
+                                db.customers.remove(m);
+                                db.save();
+                              }
+                            },
+                          ),
                       ]),
                     ),
                 ]),
@@ -691,7 +1129,8 @@ class RepairsPage extends StatelessWidget {
                                 value: 'next',
                                 child: Text('نقل إلى: ${st[n(r['status']).toInt() + 1]}')),
                           const PopupMenuItem(value: 'edit', child: Text('تعديل')),
-                          const PopupMenuItem(value: 'del', child: Text('حذف')),
+                          if (isAdmin)
+                            const PopupMenuItem(value: 'del', child: Text('حذف')),
                         ],
                       ),
                     ),
@@ -728,8 +1167,7 @@ class ExpensesPage extends StatelessWidget {
                   for (final e in db.expenses.reversed.toList())
                     ListTile(
                       title: Text('${e['title']}'),
-                      subtitle: Text((e['date'] as String)
-                          .substring(0, 10)),
+                      subtitle: Text((e['date'] as String).substring(0, 10)),
                       leading: Text(f(n(e['amount'])),
                           style: const TextStyle(
                               fontWeight: FontWeight.bold, color: Colors.red)),
