@@ -5,6 +5,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 typedef M = Map<String, dynamic>;
@@ -19,7 +20,7 @@ String newCode() =>
 class Db extends ChangeNotifier {
   static final Db i = Db._();
   Db._();
-  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings'];
+  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings', 'logs'];
   final Map<String, List<M>> t = {for (final k in keys) k: <M>[]};
   SharedPreferences? p;
   M? me;
@@ -32,6 +33,11 @@ class Db extends ChangeNotifier {
   List<M> get suppliers => t['suppliers']!;
   List<M> get purchases => t['purchases']!;
   List<M> get closings => t['closings']!;
+  List<M> get logs => t['logs']!;
+  void log(String x) {
+    logs.add({'id': nid(), 'date': DateTime.now().toIso8601String(), 'by': me?['name'] ?? '-', 'text': x});
+    if (logs.length > 500) logs.removeAt(0);
+  }
 
   Future<void> load() async {
     p = await SharedPreferences.getInstance();
@@ -145,6 +151,23 @@ void msg(BuildContext c, String s) =>
 
 Widget empty() => const Center(child: Text('لا توجد بيانات'));
 
+final la = LocalAuthentication();
+Future<bool> deviceAuth(BuildContext c, bool bioOnly) async {
+  try {
+    if (!await la.isDeviceSupported()) {
+      if (c.mounted) msg(c, 'فعّل قفل الشاشة أو البصمة في إعدادات هاتفك أولاً');
+      return false;
+    }
+    return await la.authenticate(
+        localizedReason: 'تأكيد الهوية',
+        options: AuthenticationOptions(biometricOnly: bioOnly, stickyAuth: true));
+  } catch (_) {
+    return false;
+  }
+}
+
+final ValueNotifier<int> goto = ValueNotifier<int>(-1);
+
 Future<String?> scan(BuildContext c) => Navigator.push<String>(
     c, MaterialPageRoute(builder: (_) => const ScanPage()));
 
@@ -206,8 +229,8 @@ class App extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
-        title: 'محل الهواتف',
-        theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+        title: 'Al Itqan Store',
+        theme: ThemeData(colorSchemeSeed: const Color(0xFF1A237E), useMaterial3: true),
         builder: (c, w) =>
             Directionality(textDirection: TextDirection.rtl, child: w!),
         home: const Gate(),
@@ -267,13 +290,50 @@ class _AuthState extends State<AuthPage> {
     }
   }
 
+  Future<M?> pickUser(List<M> l) async {
+    if (l.length == 1) return l.first;
+    return showDialog<M>(
+        context: context,
+        builder: (d) => SimpleDialog(title: const Text('اختر الحساب'), children: [
+              for (final x in l)
+                SimpleDialogOption(onPressed: () => Navigator.pop(d, x), child: Text('${x['name']}'))
+            ]));
+  }
+
+  Future<void> bioLogin() async {
+    final l = db.users.where((u) => u['bio'] == true).toList();
+    if (l.isEmpty || !await deviceAuth(context, true) || !mounted) return;
+    final u = await pickUser(l);
+    if (u == null) return;
+    db.me = u;
+    db.log('دخول بالبصمة/الوجه');
+    db.save();
+  }
+
+  Future<void> forgot() async {
+    if (!await deviceAuth(context, false) || !mounted) return;
+    final u = await pickUser(db.users.where((x) => x['role'] == 'admin').toList());
+    if (u == null || !mounted) return;
+    final r = await form(context, 'كلمة مرور جديدة لـ ${u['name']}', ['كلمة المرور الجديدة'], null, {});
+    if (r == null || !mounted) return;
+    if (r[0].length < 4) {
+      msg(context, 'كلمة المرور 4 أحرف على الأقل');
+      return;
+    }
+    u['pass'] = r[0];
+    db.log('إعادة تعيين كلمة مرور ${u['name']}');
+    db.save();
+    msg(context, 'تم تغيير كلمة المرور، سجّل الدخول الآن');
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: Column(children: [
-              const Icon(Icons.phone_android, size: 72, color: Colors.indigo),
+              const Icon(Icons.phone_android, size: 72, color: Color(0xFF1A237E)),
+              const Text('Al Itqan Store', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Color(0xFF1A237E))),
               const SizedBox(height: 8),
               Text(widget.setup ? 'إنشاء حساب المدير (صاحب المحل)' : 'تسجيل الدخول',
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -292,6 +352,14 @@ class _AuthState extends State<AuthPage> {
               const SizedBox(height: 16),
               ElevatedButton(
                   onPressed: go, child: Text(widget.setup ? 'إنشاء ودخول' : 'دخول')),
+              if (!widget.setup) ...[
+                if (db.users.any((u) => u['bio'] == true))
+                  OutlinedButton.icon(
+                      onPressed: bioLogin,
+                      icon: const Icon(Icons.fingerprint),
+                      label: const Text('الدخول بالبصمة / الوجه')),
+                TextButton(onPressed: forgot, child: const Text('نسيت كلمة المرور؟')),
+              ],
             ]),
           ),
         ),
@@ -306,6 +374,25 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   int i = 0;
+  void jump() {
+    if (goto.value >= 0 && mounted) {
+      setState(() => i = goto.value);
+    }
+    goto.value = -1;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    goto.addListener(jump);
+  }
+
+  @override
+  void dispose() {
+    goto.removeListener(jump);
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final a = isAdmin;
@@ -349,6 +436,12 @@ class MorePage extends StatelessWidget {
                 c, MaterialPageRoute(builder: (_) => const CashPage())),
           ),
           if (isAdmin) ...[
+            ListTile(
+              leading: const Icon(Icons.history_edu),
+              title: const Text('سجل العمليات'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const LogsPage())),
+            ),
             ListTile(
               leading: const Icon(Icons.bar_chart),
               title: const Text('التقارير'),
@@ -408,6 +501,19 @@ class MorePage extends StatelessWidget {
               },
             ),
           ],
+          ListenableBuilder(
+            listenable: db,
+            builder: (c, _) => SwitchListTile(
+              secondary: const Icon(Icons.fingerprint),
+              title: const Text('الدخول بالبصمة / الوجه'),
+              value: db.me?['bio'] == true,
+              onChanged: (v) async {
+                if (v && !await deviceAuth(c, true)) return;
+                db.me?['bio'] = v;
+                db.save();
+              },
+            ),
+          ),
           ListTile(
             leading: const Icon(Icons.logout, color: Colors.red),
             title: const Text('تسجيل الخروج'),
@@ -466,6 +572,7 @@ class UsersPage extends StatelessWidget {
       if (c.mounted) msg(c, 'اسم المستخدم مستخدم مسبقاً');
       return;
     }
+    db.log('إضافة حساب ${nm.text.trim()}');
     db.users.add({
       'id': nid(),
       'name': nm.text.trim(),
@@ -504,6 +611,7 @@ class UsersPage extends StatelessWidget {
                         icon: const Icon(Icons.delete, color: Colors.red),
                         onPressed: () async {
                           if (await sure(c)) {
+                            db.log('حذف حساب ${u['name']}');
                             db.users.remove(u);
                             db.save();
                           }
@@ -517,21 +625,28 @@ class UsersPage extends StatelessWidget {
 
 class Dash extends StatelessWidget {
   const Dash({super.key});
+
+  String cmp(double a, double b) =>
+      b == 0 ? '-' : '${a >= b ? '▲' : '▼'} ${f(((a - b) / b * 100).abs())}%';
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
         listenable: db,
         builder: (c, _) {
           final now = DateTime.now();
-          double ts = 0, tp = 0, sales = 0, profit = 0;
+          final today = DateTime(now.year, now.month, now.day);
+          final days = List<double>.filled(7, 0);
+          double tp = 0, lw = 0, sales = 0, profit = 0;
           for (final s in db.sales) {
             final d = DateTime.parse(s['date'] as String);
+            final k = today.difference(DateTime(d.year, d.month, d.day)).inDays;
             sales += n(s['total']);
             profit += n(s['profit']);
-            if (d.year == now.year && d.month == now.month && d.day == now.day) {
-              ts += n(s['total']);
-              tp += n(s['profit']);
-            }
+            if (k == 0) tp += n(s['profit']);
+            if (k == 7) lw += n(s['total']);
+            if (k >= 0 && k < 7) days[6 - k] += n(s['total']);
           }
+          final mx = days.reduce((a, b) => a > b ? a : b);
           final exp = db.expenses.fold<double>(0, (a, e) => a + n(e['amount']));
           final rep = db.repairs
               .where((r) => n(r['status']) == 2)
@@ -539,9 +654,17 @@ class Dash extends StatelessWidget {
           final debts = db.customers.fold<double>(0, (a, e) => a + n(e['debt']));
           final stock = db.products
               .fold<double>(0, (a, e) => a + n(e['cost']) * n(e['qty']));
-          final low = db.products.where((p) => n(p['qty']) <= 2).toList();
+          final low = db.products
+              .where((p) => n(p['qty']) <= (p['min'] == null ? 2 : n(p['min'])))
+              .toList();
+          final overdue = db.customers
+              .where((x) =>
+                  n(x['debt']) > 0 &&
+                  x['due'] != null &&
+                  DateTime.parse(x['due'] as String).isBefore(now))
+              .toList();
+          final ready = db.repairs.where((r) => n(r['status']) == 1).toList();
           final cards = <(String, double, IconData, Color)>[
-            ('مبيعات اليوم', ts, Icons.today, Colors.blue),
             ('ربح اليوم', tp, Icons.trending_up, Colors.green),
             ('إجمالي المبيعات', sales, Icons.shopping_cart, Colors.indigo),
             ('إجمالي الربح', profit, Icons.savings, Colors.teal),
@@ -552,8 +675,65 @@ class Dash extends StatelessWidget {
             ('قيمة المخزون', stock, Icons.inventory, Colors.brown),
           ];
           return Scaffold(
-            appBar: AppBar(title: const Text('لوحة التحكم')),
+            appBar: AppBar(title: const Text('Al Itqan Store')),
             body: ListView(padding: const EdgeInsets.all(8), children: [
+              SizedBox(
+                height: 52,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1A237E),
+                      foregroundColor: Colors.white),
+                  onPressed: () => goto.value = 2,
+                  icon: const Icon(Icons.point_of_sale),
+                  label: const Text('بيع جديد', style: TextStyle(fontSize: 18)),
+                ),
+              ),
+              Wrap(spacing: 8, children: [
+                for (final q in <(String, IconData, Widget)>[
+                  ('المصروفات', Icons.money_off, const ExpensesPage()),
+                  ('سجل المبيعات', Icons.receipt_long, const SalesPage()),
+                  ('التقارير', Icons.bar_chart, const ReportsPage()),
+                  ('الموردون', Icons.local_shipping, const SuppliersPage()),
+                ])
+                  ActionChip(
+                    avatar: Icon(q.$2, size: 18),
+                    label: Text(q.$1),
+                    onPressed: () => Navigator.push(
+                        c, MaterialPageRoute(builder: (_) => q.$3)),
+                  ),
+              ]),
+              Card(
+                child: Column(children: [
+                  row('مبيعات اليوم', f(days[6])),
+                  row('مقارنة بأمس', cmp(days[6], days[5]),
+                      c: days[6] >= days[5] ? Colors.green : Colors.red),
+                  row('مقارنة بنفس اليوم الأسبوع الماضي', cmp(days[6], lw),
+                      c: days[6] >= lw ? Colors.green : Colors.red),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                    child: SizedBox(
+                      height: 110,
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                        for (var i = 0; i < 7; i++)
+                          Expanded(
+                            child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
+                              Text(f(days[i]), style: const TextStyle(fontSize: 9)),
+                              Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 4),
+                                height: mx == 0 ? 2 : 2 + days[i] / mx * 70,
+                                decoration: BoxDecoration(
+                                    color: i == 6 ? Colors.indigo : Colors.indigo.shade200,
+                                    borderRadius: BorderRadius.circular(4)),
+                              ),
+                              Text(ds(today.subtract(Duration(days: 6 - i))).substring(8),
+                                  style: const TextStyle(fontSize: 10)),
+                            ]),
+                          ),
+                      ]),
+                    ),
+                  ),
+                ]),
+              ),
               GridView.count(
                 crossAxisCount: 2,
                 shrinkWrap: true,
@@ -566,33 +746,44 @@ class Dash extends StatelessWidget {
                     Card(
                       child: Padding(
                         padding: const EdgeInsets.all(8),
-                        child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(k.$3, color: k.$4),
-                              Text(k.$1),
-                              Text(f(k.$2),
-                                  style: const TextStyle(
-                                      fontSize: 18, fontWeight: FontWeight.bold)),
-                            ]),
+                        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          Icon(k.$3, color: k.$4),
+                          Text(k.$1),
+                          Text(f(k.$2),
+                              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        ]),
                       ),
                     ),
                 ],
               ),
-              if (low.isNotEmpty)
-                Card(
-                  color: Colors.red.shade50,
-                  child: Column(children: [
-                    const ListTile(
-                        leading: Icon(Icons.error, color: Colors.red),
-                        title: Text('تنبيه: منتجات قاربت على النفاد')),
-                    for (final p in low)
-                      ListTile(
-                          dense: true,
-                          title: Text('${p['name']}'),
-                          trailing: Text('الكمية: ${f(n(p['qty']))}')),
-                  ]),
-                ),
+              Card(
+                color: Colors.amber.shade50,
+                child: Column(children: [
+                  const ListTile(
+                      leading: Icon(Icons.notifications_active, color: Colors.orange),
+                      title: Text('يحتاج انتباه')),
+                  if (low.isEmpty && overdue.isEmpty && ready.isEmpty)
+                    const ListTile(dense: true, title: Text('لا شيء يحتاج انتباه حالياً ✅')),
+                  for (final p in low)
+                    ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.inventory_2, color: Colors.red),
+                        title: Text('مخزون منخفض: ${p['name']}'),
+                        trailing: Text('${f(n(p['qty']))}')),
+                  for (final x in overdue)
+                    ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.warning, color: Colors.deepOrange),
+                        title: Text('دين متأخر: ${x['name']}'),
+                        trailing: Text(f(n(x['debt'])))),
+                  for (final r in ready)
+                    ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.build_circle, color: Colors.green),
+                        title: Text('صيانة جاهزة للتسليم: ${r['device']}'),
+                        trailing: Text('${r['customer']}')),
+                ]),
+              ),
             ]),
           );
         },
@@ -612,7 +803,7 @@ class _ProductsState extends State<ProductsPage> {
     final r = await form(
       context,
       p == null ? 'إضافة منتج' : 'تعديل منتج',
-      ['الاسم', 'التصنيف', 'الباركود / IMEI (فارغ = توليد تلقائي)', 'سعر الشراء', 'سعر البيع', 'الكمية'],
+      ['الاسم', 'التصنيف', 'الباركود / IMEI (فارغ = توليد تلقائي)', 'سعر الشراء', 'سعر البيع', 'الكمية', 'حد تنبيه المخزون'],
       p == null
           ? null
           : [
@@ -621,9 +812,10 @@ class _ProductsState extends State<ProductsPage> {
               '${p['imei']}',
               f(n(p['cost'])),
               f(n(p['price'])),
-              f(n(p['qty']))
+              f(n(p['qty'])),
+              f(p['min'] == null ? 2 : n(p['min']))
             ],
-      {3, 4, 5},
+      {3, 4, 5, 6},
       scanIdx: 2,
     );
     if (r == null || r[0].isEmpty) return;
@@ -634,6 +826,7 @@ class _ProductsState extends State<ProductsPage> {
     m['cost'] = pd(r[3]);
     m['price'] = pd(r[4]);
     m['qty'] = pd(r[5]).toInt();
+    m['min'] = r[6].isEmpty ? 2 : pd(r[6]).toInt();
     if (p == null) db.products.add(m);
     db.save();
     if (p == null && mounted) {
@@ -679,7 +872,7 @@ class _ProductsState extends State<ProductsPage> {
                             isThreeLine: true,
                             leading: CircleAvatar(
                               backgroundColor:
-                                  n(p['qty']) <= 2 ? Colors.red : Colors.green,
+                                  n(p['qty']) <= (p['min'] == null ? 2 : n(p['min'])) ? Colors.red : Colors.green,
                               foregroundColor: Colors.white,
                               child: Text(f(n(p['qty']))),
                             ),
@@ -696,6 +889,7 @@ class _ProductsState extends State<ProductsPage> {
                                       icon: const Icon(Icons.delete, color: Colors.red),
                                       onPressed: () async {
                                         if (await sure(c)) {
+                                          db.log('حذف منتج ${p['name']}');
                                           db.products.remove(p);
                                           db.save();
                                         }
@@ -750,6 +944,8 @@ class _PosState extends State<PosPage> {
     if (cart.isEmpty) return;
     final total0 = sub;
     int? cid;
+    String method = 'نقدي';
+    final due = TextEditingController(text: '30');
     final disc = TextEditingController();
     final paid = TextEditingController();
     final ok = await showDialog<bool>(
@@ -779,6 +975,19 @@ class _PosState extends State<PosPage> {
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
                       labelText: 'المبلغ المدفوع (فارغ = كامل)')),
+              DropdownButton<String>(
+                isExpanded: true,
+                value: method,
+                items: const [
+                  DropdownMenuItem(value: 'نقدي', child: Text('الدفع: نقدي')),
+                  DropdownMenuItem(value: 'تحويل', child: Text('الدفع: تحويل / بطاقة')),
+                ],
+                onChanged: (v) => set(() => method = v ?? 'نقدي'),
+              ),
+              TextField(
+                  controller: due,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'مهلة سداد الدين بالأيام')),
             ]),
           ),
           actions: [
@@ -817,10 +1026,17 @@ class _PosState extends State<PosPage> {
     if (cid != null) {
       final cu = db.customers.firstWhere((x) => x['id'] == cid);
       cu['debt'] = n(cu['debt']) + debt;
+      if (debt > 0) {
+        cu['due'] = DateTime.now().add(Duration(days: pd(due.text).toInt())).toIso8601String();
+      }
       cname = '${cu['name']}';
     }
+    final no = db.sales.fold<int>(0, (a, s) => n(s['no']).toInt() > a ? n(s['no']).toInt() : a) + 1;
+    db.log('بيع فاتورة رقم $no بقيمة ${f(total)}');
     db.sales.add({
       'id': nid(),
+      'no': no,
+      'method': method,
       'date': DateTime.now().toIso8601String(),
       'customer': cname,
       'cid': cid,
@@ -963,6 +1179,7 @@ class SalesPage extends StatelessWidget {
         l.first['debt'] = left < 0 ? 0.0 : left;
       }
     }
+    db.log('إرجاع فاتورة ${s['no'] ?? ''}');
     db.sales.remove(s);
     db.save();
   }
@@ -979,7 +1196,7 @@ class SalesPage extends StatelessWidget {
                 : ListView(children: [
                     for (final s in list)
                       ListTile(
-                        title: Text('${s['customer']} - ${f(n(s['total']))}'),
+                        title: Text('#${s['no'] ?? ''} ${s['customer']} - ${f(n(s['total']))}'),
                         subtitle: Text(
                             '${(s['date'] as String).substring(0, 16).replaceFirst('T', ' ')} • ${s['by'] ?? ''}'),
                         trailing: n(s['debt']) > 0
@@ -1073,6 +1290,7 @@ class CustomersPage extends StatelessWidget {
                             icon: const Icon(Icons.delete, color: Colors.red),
                             onPressed: () async {
                               if (await sure(c)) {
+                                db.log('حذف عميل ${m['name']}');
                                 db.customers.remove(m);
                                 db.save();
                               }
@@ -1093,17 +1311,18 @@ class RepairsPage extends StatelessWidget {
     final r = await form(
         c,
         m == null ? 'جهاز جديد للصيانة' : 'تعديل',
-        ['الجهاز', 'اسم العميل', 'المشكلة', 'التكلفة'],
+        ['الجهاز', 'اسم العميل', 'المشكلة', 'التكلفة', 'العربون المدفوع'],
         m == null
             ? null
-            : ['${m['device']}', '${m['customer']}', '${m['problem']}', f(n(m['cost']))],
-        {3});
+            : ['${m['device']}', '${m['customer']}', '${m['problem']}', f(n(m['cost'])), f(n(m['deposit']))],
+        {3, 4});
     if (r == null || r[0].isEmpty) return;
-    final x = m ?? <String, dynamic>{'id': nid(), 'status': 0};
+    final x = m ?? <String, dynamic>{'id': nid(), 'status': 0, 'no': db.repairs.fold<int>(0, (a, r) => n(r['no']).toInt() > a ? n(r['no']).toInt() : a) + 1};
     x['device'] = r[0];
     x['customer'] = r[1];
     x['problem'] = r[2];
     x['cost'] = pd(r[3]);
+    x['deposit'] = pd(r[4]);
     if (m == null) db.repairs.add(x);
     db.save();
   }
@@ -1127,9 +1346,9 @@ class RepairsPage extends StatelessWidget {
                               : n(r['status']) == 1
                                   ? Colors.orange
                                   : Colors.grey),
-                      title: Text('${r['device']} - ${r['customer']}'),
+                      title: Text('#${r['no'] ?? ''} ${r['device']} - ${r['customer']}'),
                       subtitle: Text(
-                          '${r['problem']}\n${f(n(r['cost']))} | ${st[n(r['status']).toInt()]}'),
+                          '${r['problem']}\n${f(n(r['cost']))} (عربون ${f(n(r['deposit']))} • متبقي ${f(n(r['cost']) - n(r['deposit']))}) | ${st[n(r['status']).toInt()]}'),
                       trailing: PopupMenuButton<String>(
                         onSelected: (v) async {
                           if (v == 'next') {
@@ -1413,8 +1632,8 @@ class ReportsPage extends StatefulWidget {
 }
 
 class _ReportsState extends State<ReportsPage> {
-  late DateTime from;
-  late DateTime to;
+  overdue DateTime from;
+  overdue DateTime to;
   int mode = 0;
 
   @override
@@ -1546,7 +1765,7 @@ class CashPage extends StatelessWidget {
     double e = 0;
     for (final s in db.sales) {
       if (s['by'] == db.me?['name'] && sameDay(DateTime.parse(s['date'] as String), now)) {
-        e += n(s['paid']);
+        if (s['method'] != 'تحويل') e += n(s['paid']);
       }
     }
     return e;
@@ -1623,4 +1842,26 @@ class CashPage extends StatelessWidget {
           );
         },
       );
+}
+
+class LogsPage extends StatelessWidget {
+  const LogsPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final list = db.logs.reversed.toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('سجل العمليات')),
+      body: list.isEmpty
+          ? empty()
+          : ListView(children: [
+              for (final l in list)
+                ListTile(
+                  dense: true,
+                  title: Text('${l['text']}'),
+                  subtitle: Text(
+                      '${l['by']} • ${(l['date'] as String).substring(0, 16).replaceFirst('T', ' ')}'),
+                ),
+            ]),
+    );
+  }
 }
