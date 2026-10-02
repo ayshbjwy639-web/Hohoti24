@@ -10,7 +10,7 @@ jobs:
           channel: stable
       - run: flutter create --project-name phone_shop --platforms=android .
       - run: cp main.dart lib/main.dart
-      - run: flutter pub add shared_preferences mobile_scanner pdf printing local_auth:^2.3.0 crypto share_plus:^10.1.0 file_picker:^8.1.0 dev:flutter_launcher_icons
+      - run: flutter pub add shared_preferences mobile_scanner pdf printing local_auth:^2.3.0 crypto share_plus:^10.1.0 file_picker:^8.1.0 sqflite dev:flutter_launcher_icons
       - run: sed -i 's/flutter.minSdkVersion/24/' android/app/build.gradle*
       - run: sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/><uses-permission android:name="android.permission.USE_BIOMETRIC"/><application#' android/app/src/main/AndroidManifest.xml
       - run: sed -i 's/android:label="[^"]*"/android:label="Al Itqan Store"/' android/app/src/main/AndroidManifest.xml
@@ -49,6 +49,12 @@ jobs:
           python make_icon.py
           printf 'flutter_launcher_icons:\n  android: true\n  ios: false\n  image_path: "icon.png"\n  adaptive_icon_background: "#1A237E"\n  adaptive_icon_foreground: "icon_fg.png"\n' > flutter_launcher_icons.yaml
           dart run flutter_launcher_icons
+      - name: Restore signing key
+        env:
+          KS: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$KS" ]; then echo "$KS" | base64 -d > ~/.android/debug.keystore; else echo "::warning::KEYSTORE_B64 secret missing, using a random key"; fi
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
