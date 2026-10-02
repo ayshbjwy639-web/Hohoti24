@@ -1,4 +1,8 @@
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -20,7 +24,7 @@ String newCode() =>
 class Db extends ChangeNotifier {
   static final Db i = Db._();
   Db._();
-  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings', 'logs'];
+  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings', 'logs', 'returns', 'payments'];
   final Map<String, List<M>> t = {for (final k in keys) k: <M>[]};
   SharedPreferences? p;
   M? me;
@@ -34,6 +38,9 @@ class Db extends ChangeNotifier {
   List<M> get purchases => t['purchases']!;
   List<M> get closings => t['closings']!;
   List<M> get logs => t['logs']!;
+  List<M> get returns => t['returns']!;
+  List<M> get payments => t['payments']!;
+  String? lastBackup;
   void log(String x) {
     logs.add({'id': nid(), 'date': DateTime.now().toIso8601String(), 'by': me?['name'] ?? '-', 'text': x});
     if (logs.length > 500) logs.removeAt(0);
@@ -41,6 +48,7 @@ class Db extends ChangeNotifier {
 
   Future<void> load() async {
     p = await SharedPreferences.getInstance();
+    lastBackup = p!.getString('lastBackup');
     for (final k in keys) {
       final s = p!.getString(k);
       if (s != null) {
@@ -51,10 +59,21 @@ class Db extends ChangeNotifier {
     }
   }
 
+  final Map<String, String> last = {};
   void save() {
     for (final k in keys) {
-      p?.setString(k, jsonEncode(t[k]));
+      final j = jsonEncode(t[k]);
+      if (last[k] != j) {
+        last[k] = j;
+        p?.setString(k, j);
+      }
     }
+    notifyListeners();
+  }
+
+  void markBackup() {
+    lastBackup = DateTime.now().toIso8601String();
+    p?.setString('lastBackup', lastBackup!);
     notifyListeners();
   }
 
@@ -89,6 +108,18 @@ class Db extends ChangeNotifier {
 
 final db = Db.i;
 bool get isAdmin => db.me?['role'] == 'admin';
+
+String hashPw(String salt, String p) =>
+    sha256.convert(utf8.encode('$salt|$p')).toString();
+void setPw(M u, String p) {
+  final salt = nid().toString();
+  u['salt'] = salt;
+  u['hash'] = hashPw(salt, p);
+  u.remove('pass');
+}
+
+bool checkPw(M u, String p) =>
+    u['hash'] != null ? u['hash'] == hashPw('${u['salt']}', p) : u['pass'] == p;
 
 Future<List<String>?> form(BuildContext c, String title, List<String> labels,
     List<String>? init, Set<int> nums,
@@ -261,6 +292,8 @@ class _AuthState extends State<AuthPage> {
   final nm = TextEditingController();
   final us = TextEditingController();
   final ps = TextEditingController();
+  int fails = 0;
+  DateTime? lockUntil;
 
   void go() {
     final u = us.text.trim();
@@ -273,18 +306,29 @@ class _AuthState extends State<AuthPage> {
         'id': nid(),
         'name': nm.text.trim(),
         'user': u,
-        'pass': ps.text,
         'role': 'admin'
       };
+      setPw(m, ps.text);
       db.users.add(m);
       db.me = m;
       db.save();
     } else {
-      final l = db.users.where((x) => x['user'] == u && x['pass'] == ps.text).toList();
+      final l = db.users.where((x) => x['user'] == u && checkPw(x, ps.text)).toList();
+      if (lockUntil != null && DateTime.now().isBefore(lockUntil!)) {
+        msg(context, 'محاولات كثيرة خاطئة، انتظر دقيقة');
+        return;
+      }
       if (l.isEmpty) {
+        fails++;
+        if (fails >= 5) {
+          fails = 0;
+          lockUntil = DateTime.now().add(const Duration(minutes: 1));
+        }
         msg(context, 'بيانات الدخول غير صحيحة');
         return;
       }
+      if (l.first['hash'] == null) setPw(l.first, ps.text);
+      fails = 0;
       db.me = l.first;
       db.save();
     }
@@ -320,7 +364,7 @@ class _AuthState extends State<AuthPage> {
       msg(context, 'كلمة المرور 4 أحرف على الأقل');
       return;
     }
-    u['pass'] = r[0];
+    setPw(u, r[0]);
     db.log('إعادة تعيين كلمة مرور ${u['name']}');
     db.save();
     msg(context, 'تم تغيير كلمة المرور، سجّل الدخول الآن');
@@ -372,7 +416,7 @@ class Home extends StatefulWidget {
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> {
+class _HomeState extends State<Home> with WidgetsBindingObserver {
   int i = 0;
   void jump() {
     if (goto.value >= 0 && mounted) {
@@ -385,11 +429,25 @@ class _HomeState extends State<Home> {
   void initState() {
     super.initState();
     goto.addListener(jump);
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  DateTime? away;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.paused) {
+      away = DateTime.now();
+    } else if (st == AppLifecycleState.resumed && away != null) {
+      if (DateTime.now().difference(away!).inSeconds > 120) db.logout();
+      away = null;
+    }
   }
 
   @override
   void dispose() {
     goto.removeListener(jump);
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
@@ -469,10 +527,35 @@ class MorePage extends StatelessWidget {
             ListTile(
               leading: const Icon(Icons.backup),
               title: const Text('نسخ احتياطي'),
-              subtitle: const Text('ينسخ كل البيانات، الصقها في واتساب أو ملاحظات'),
+              subtitle: const Text('يصدّر ملفاً تحفظه أو ترسله لواتساب'),
               onTap: () async {
-                await Clipboard.setData(ClipboardData(text: db.export()));
-                if (c.mounted) msg(c, 'تم نسخ البيانات، الصقها في مكان آمن');
+                try {
+                  final name = 'itqan_backup_${ds(DateTime.now())}.json';
+                  await Share.shareXFiles([
+                    XFile.fromData(Uint8List.fromList(utf8.encode(db.export())),
+                        mimeType: 'application/json', name: name)
+                  ], fileNameOverrides: [name], subject: name);
+                  db.markBackup();
+                } catch (_) {
+                  await Clipboard.setData(ClipboardData(text: db.export()));
+                  db.markBackup();
+                  if (c.mounted) msg(c, 'تعذّر إنشاء الملف، نُسخت البيانات للحافظة بدلاً منه');
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.upload_file),
+              title: const Text('استعادة من ملف'),
+              onTap: () async {
+                final r = await FilePicker.platform.pickFiles(withData: true);
+                final b = r?.files.single.bytes;
+                if (b == null || !c.mounted) return;
+                if (!await ask(c, 'سيتم استبدال كل البيانات الحالية. متابعة؟')) return;
+                var done = false;
+                try {
+                  done = db.restore(utf8.decode(b));
+                } catch (_) {}
+                if (!done && c.mounted) msg(c, 'الملف غير صالح');
               },
             ),
             ListTile(
@@ -573,13 +656,14 @@ class UsersPage extends StatelessWidget {
       return;
     }
     db.log('إضافة حساب ${nm.text.trim()}');
-    db.users.add({
+    final nu = <String, dynamic>{
       'id': nid(),
       'name': nm.text.trim(),
       'user': u,
-      'pass': ps.text,
       'role': adm ? 'admin' : 'staff'
-    });
+    };
+    setPw(nu, ps.text);
+    db.users.add(nu);
     db.save();
   }
 
@@ -602,7 +686,7 @@ class UsersPage extends StatelessWidget {
                   final r = await form(
                       c, 'كلمة مرور جديدة', ['كلمة المرور'], null, {});
                   if (r == null || r[0].length < 4) return;
-                  u['pass'] = r[0];
+                  setPw(u, r[0]);
                   db.save();
                 },
                 trailing: u['id'] == db.me?['id']
@@ -664,6 +748,9 @@ class Dash extends StatelessWidget {
                   DateTime.parse(x['due'] as String).isBefore(now))
               .toList();
           final ready = db.repairs.where((r) => n(r['status']) == 1).toList();
+          final stale = db.lastBackup == null
+              ? db.sales.isNotEmpty
+              : now.difference(DateTime.parse(db.lastBackup!)).inDays >= 7;
           final cards = <(String, double, IconData, Color)>[
             ('ربح اليوم', tp, Icons.trending_up, Colors.green),
             ('إجمالي المبيعات', sales, Icons.shopping_cart, Colors.indigo),
@@ -762,8 +849,16 @@ class Dash extends StatelessWidget {
                   const ListTile(
                       leading: Icon(Icons.notifications_active, color: Colors.orange),
                       title: Text('يحتاج انتباه')),
-                  if (low.isEmpty && overdue.isEmpty && ready.isEmpty)
+                  if (low.isEmpty && overdue.isEmpty && ready.isEmpty && !stale)
                     const ListTile(dense: true, title: Text('لا شيء يحتاج انتباه حالياً ✅')),
+                  if (stale)
+                    ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.backup, color: Colors.orange),
+                        title: Text(db.lastBackup == null
+                            ? 'لم تأخذ نسخة احتياطية بعد'
+                            : 'مرّ 7 أيام أو أكثر على آخر نسخة احتياطية'),
+                        subtitle: const Text('المزيد ← نسخ احتياطي')),
                   for (final p in low)
                     ListTile(
                         dense: true,
@@ -1180,6 +1275,16 @@ class SalesPage extends StatelessWidget {
       }
     }
     db.log('إرجاع فاتورة ${s['no'] ?? ''}');
+    db.returns.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'no': s['no'],
+      'customer': s['customer'],
+      'total': n(s['total']),
+      'profit': n(s['profit']),
+      'by': db.me?['name'],
+      'items': s['items'],
+    });
     db.sales.remove(s);
     db.save();
   }
@@ -1258,6 +1363,15 @@ class CustomersPage extends StatelessWidget {
     if (r == null) return;
     final a = pd(r[0]);
     if (a <= 0) return;
+    db.payments.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'kind': 'customer',
+      'name': m['name'],
+      'amount': a > n(m['debt']) ? n(m['debt']) : a,
+      'by': db.me?['name'],
+    });
+    db.log('تسديد دين ${m['name']}: ${f(a > n(m['debt']) ? n(m['debt']) : a)}');
     final left = n(m['debt']) - a;
     m['debt'] = left < 0 ? 0.0 : left;
     db.save();
@@ -1458,6 +1572,15 @@ class SuppliersPage extends StatelessWidget {
     if (r == null) return;
     final a = pd(r[0]);
     if (a <= 0) return;
+    db.payments.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'kind': 'supplier',
+      'name': m['name'],
+      'amount': a > n(m['debt']) ? n(m['debt']) : a,
+      'by': db.me?['name'],
+    });
+    db.log('تسديد للمورد ${m['name']}: ${f(a > n(m['debt']) ? n(m['debt']) : a)}');
     final left = n(m['debt']) - a;
     m['debt'] = left < 0 ? 0.0 : left;
     db.save();
@@ -1699,6 +1822,12 @@ class _ReportsState extends State<ReportsPage> {
     final buy = db.purchases
         .where((e) => inR(e['date'] as String))
         .fold<double>(0, (a, e) => a + n(e['total']));
+    final ret = db.returns
+        .where((e) => inR(e['date'] as String))
+        .fold<double>(0, (a, e) => a + n(e['total']));
+    final coll = db.payments
+        .where((e) => e['kind'] == 'customer' && inR(e['date'] as String))
+        .fold<double>(0, (a, e) => a + n(e['amount']));
     final top = qty.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     const labels = ['اليوم', 'آخر 7 أيام', 'هذا الشهر'];
     return Scaffold(
@@ -1728,6 +1857,8 @@ class _ReportsState extends State<ReportsPage> {
             row('المصروفات', f(exp), c: Colors.red),
             row('صافي الربح (الربح - المصروفات)', f(profit - exp), c: Colors.purple),
             row('مشتريات بضاعة (للعلم)', f(buy)),
+            row('مرتجعات (حُذفت من المبيعات)', f(ret), c: Colors.red),
+            row('تحصيل ديون العملاء', f(coll), c: Colors.green),
           ]),
         ),
         const Padding(
@@ -1768,6 +1899,13 @@ class CashPage extends StatelessWidget {
         if (s['method'] != 'تحويل') e += n(s['paid']);
       }
     }
+    for (final x in db.payments) {
+      if (x['kind'] == 'customer' &&
+          x['by'] == db.me?['name'] &&
+          sameDay(DateTime.parse(x['date'] as String), now)) {
+        e += n(x['amount']);
+      }
+    }
     return e;
   }
 
@@ -1803,7 +1941,7 @@ class CashPage extends StatelessWidget {
               Card(
                 child: Column(children: [
                   row('الموظف', '${db.me?['name']}'),
-                  row('المتوقع في الدرج اليوم (المدفوع نقداً)', f(expected())),
+                  row('المتوقع في الدرج (مبيعات نقدية + تحصيل ديون)', f(expected())),
                   Padding(
                     padding: const EdgeInsets.all(8),
                     child: ElevatedButton.icon(
