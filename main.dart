@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -46,28 +47,78 @@ class Db extends ChangeNotifier {
     if (logs.length > 500) logs.removeAt(0);
   }
 
+  Database? sdb;
+  final Map<String, Map<int, String>> snap = {
+    for (final k in keys) k: <int, String>{}
+  };
+  Future<void> q = Future<void>.value();
+
+  List<M> decode(String s) => (jsonDecode(s) as List)
+      .map((e) => Map<String, dynamic>.from(e as Map))
+      .toList();
+
   Future<void> load() async {
     p = await SharedPreferences.getInstance();
     lastBackup = p!.getString('lastBackup');
-    for (final k in keys) {
-      final s = p!.getString(k);
-      if (s != null) {
-        t[k] = (jsonDecode(s) as List)
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .toList();
+    final d = await openDatabase('${await getDatabasesPath()}/itqan.db',
+        version: 1,
+        onCreate: (x, v) => x.execute(
+            'CREATE TABLE docs(tbl TEXT NOT NULL, id INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(tbl, id))'));
+    sdb = d;
+    final rows = await d.query('docs', orderBy: 'id');
+    for (final r in rows) {
+      final k = r['tbl'] as String;
+      final j = r['json'] as String;
+      if (t.containsKey(k)) {
+        t[k]!.add(Map<String, dynamic>.from(jsonDecode(j) as Map));
+        snap[k]![r['id'] as int] = j;
       }
+    }
+    if (p!.getBool('migrated') != true) {
+      if (rows.isEmpty) {
+        for (final k in keys) {
+          final s = p!.getString(k);
+          if (s != null) t[k] = decode(s);
+        }
+        await flush();
+      }
+      await p!.setBool('migrated', true);
     }
   }
 
-  final Map<String, String> last = {};
-  void save() {
+  Future<void> flush() async {
+    final d = sdb;
+    if (d == null) return;
+    final b = d.batch();
+    final ns = <String, Map<int, String>>{};
+    var any = false;
     for (final k in keys) {
-      final j = jsonEncode(t[k]);
-      if (last[k] != j) {
-        last[k] = j;
-        p?.setString(k, j);
+      final old = snap[k]!;
+      final cur = <int, String>{};
+      for (final m in t[k]!) {
+        final id = (m['id'] as num).toInt();
+        final j = jsonEncode(m);
+        cur[id] = j;
+        if (old[id] != j) {
+          b.insert('docs', {'tbl': k, 'id': id, 'json': j},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+          any = true;
+        }
       }
+      for (final id in old.keys) {
+        if (!cur.containsKey(id)) {
+          b.delete('docs', where: 'tbl = ? AND id = ?', whereArgs: [k, id]);
+          any = true;
+        }
+      }
+      ns[k] = cur;
     }
+    if (any) await b.commit(noResult: true);
+    snap.addAll(ns);
+  }
+
+  void save() {
+    q = q.then((_) => flush()).catchError((_) {});
     notifyListeners();
   }
 
