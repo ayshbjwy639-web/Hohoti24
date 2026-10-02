@@ -49,6 +49,19 @@ jobs:
           python make_icon.py
           printf 'flutter_launcher_icons:\n  android: true\n  ios: false\n  image_path: "icon.png"\n  adaptive_icon_background: "#1A237E"\n  adaptive_icon_foreground: "icon_fg.png"\n' > flutter_launcher_icons.yaml
           dart run flutter_launcher_icons
+      - name: Force compileSdk 36 for plugins
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/fix.gradle <<'GRADLE'
+          allprojects {
+            afterEvaluate { p ->
+              if (p.hasProperty('android')) {
+                def cur = p.android.compileSdk
+                if (cur == null || cur < 36) { p.android.compileSdk = 36 }
+              }
+            }
+          }
+          GRADLE
       - name: Restore signing key
         env:
           KS: ${{ secrets.KEYSTORE_B64 }}
