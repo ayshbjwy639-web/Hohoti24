@@ -334,6 +334,11 @@ class App extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         title: 'Al Itqan Store',
         theme: ThemeData(colorSchemeSeed: const Color(0xFF1A237E), useMaterial3: true),
+        darkTheme: ThemeData(
+            colorSchemeSeed: const Color(0xFF1A237E),
+            brightness: Brightness.dark,
+            useMaterial3: true),
+        themeMode: ThemeMode.system,
         builder: (c, w) =>
             Directionality(textDirection: TextDirection.rtl, child: w!),
         home: const Gate(),
@@ -449,7 +454,7 @@ class _AuthState extends State<AuthPage> {
             padding: const EdgeInsets.all(24),
             child: Column(children: [
               const Icon(Icons.phone_android, size: 72, color: Color(0xFF1A237E)),
-              const Text('Al Itqan Store', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Color(0xFF1A237E))),
+              Text('Al Itqan Store', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
               const SizedBox(height: 8),
               Text(widget.setup ? 'إنشاء حساب المدير (صاحب المحل)' : 'تسجيل الدخول',
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -531,15 +536,20 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       const ProductsPage(),
       const PosPage(),
       const CustomersPage(),
-      const RepairsPage(),
       const MorePage(),
     ];
     final dest = <NavigationDestination>[
       if (a) const NavigationDestination(icon: Icon(Icons.dashboard), label: 'الرئيسية'),
       const NavigationDestination(icon: Icon(Icons.phone_android), label: 'المخزون'),
-      const NavigationDestination(icon: Icon(Icons.point_of_sale), label: 'البيع'),
+      NavigationDestination(
+        icon: CircleAvatar(
+          radius: 18,
+          backgroundColor: Theme.of(context).colorScheme.primary,
+          child: Icon(Icons.point_of_sale, size: 20, color: Theme.of(context).colorScheme.onPrimary),
+        ),
+        label: 'البيع',
+      ),
       const NavigationDestination(icon: Icon(Icons.people), label: 'العملاء'),
-      const NavigationDestination(icon: Icon(Icons.build), label: 'الصيانة'),
       const NavigationDestination(icon: Icon(Icons.more_horiz), label: 'المزيد'),
     ];
     return Scaffold(
@@ -555,65 +565,56 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
 
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
+
+  Widget head(BuildContext c, String t) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+        child: Text(t,
+            style: TextStyle(
+                fontWeight: FontWeight.bold, color: Theme.of(c).colorScheme.primary)),
+      );
+
+  Widget go(BuildContext c, IconData i, String t, Widget page) => ListTile(
+        leading: Icon(i),
+        title: Text(t),
+        trailing: const Icon(Icons.chevron_left),
+        onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => page)),
+      );
+
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text('الحساب: ${db.me?['name'] ?? ''}')),
         body: ListView(children: [
-          ListTile(
-            leading: const Icon(Icons.lock_clock),
-            title: const Text('إقفال الصندوق اليومي'),
-            onTap: () => Navigator.push(
-                c, MaterialPageRoute(builder: (_) => const CashPage())),
+          head(c, 'العمليات اليومية'),
+          go(c, Icons.build, 'الصيانة', const RepairsPage()),
+          go(c, Icons.lock_clock, 'إقفال الصندوق اليومي', const CashPage()),
+          if (isAdmin) ...[
+            head(c, 'المالية والتقارير'),
+            go(c, Icons.bar_chart, 'التقارير', const ReportsPage()),
+            go(c, Icons.money_off, 'المصروفات', const ExpensesPage()),
+            go(c, Icons.local_shipping, 'الموردون وفواتير الشراء', const SuppliersPage()),
+            head(c, 'المخزون'),
+            go(c, Icons.fact_check, 'الجرد الدوري', const InventoryPage()),
+            go(c, Icons.swap_vert, 'حركات المخزون', const MovesPage()),
+            go(c, Icons.archive, 'الأرشيف (منتجات وعملاء)', const ArchivePage()),
+            head(c, 'الإدارة'),
+            go(c, Icons.manage_accounts, 'إدارة الحسابات', const UsersPage()),
+            go(c, Icons.history_edu, 'سجل العمليات', const LogsPage()),
+          ],
+          head(c, 'الحساب والبيانات'),
+          ListenableBuilder(
+            listenable: db,
+            builder: (c2, _) => SwitchListTile(
+              secondary: const Icon(Icons.fingerprint),
+              title: const Text('الدخول بالبصمة / الوجه'),
+              value: db.me?['bio'] == true,
+              onChanged: (v) async {
+                if (v && !await deviceAuth(c2, true)) return;
+                db.me?['bio'] = v;
+                db.save();
+              },
+            ),
           ),
           if (isAdmin) ...[
-            ListTile(
-              leading: const Icon(Icons.fact_check),
-              title: const Text('الجرد الدوري'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const InventoryPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.swap_vert),
-              title: const Text('حركات المخزون'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const MovesPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.archive),
-              title: const Text('الأرشيف (منتجات وعملاء)'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const ArchivePage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.history_edu),
-              title: const Text('سجل العمليات'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const LogsPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.bar_chart),
-              title: const Text('التقارير'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const ReportsPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.local_shipping),
-              title: const Text('الموردون وفواتير الشراء'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const SuppliersPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.money_off),
-              title: const Text('المصروفات'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const ExpensesPage())),
-            ),
-            ListTile(
-              leading: const Icon(Icons.manage_accounts),
-              title: const Text('إدارة الحسابات'),
-              onTap: () => Navigator.push(
-                  c, MaterialPageRoute(builder: (_) => const UsersPage())),
-            ),
             ListTile(
               leading: const Icon(Icons.backup),
               title: const Text('نسخ احتياطي'),
@@ -650,7 +651,7 @@ class MorePage extends StatelessWidget {
             ),
             ListTile(
               leading: const Icon(Icons.restore),
-              title: const Text('استعادة نسخة احتياطية'),
+              title: const Text('استعادة نسخة احتياطية (لصق نص)'),
               onTap: () async {
                 final tc = TextEditingController();
                 final ok = await showDialog<bool>(
@@ -674,24 +675,12 @@ class MorePage extends StatelessWidget {
               },
             ),
           ],
-          ListenableBuilder(
-            listenable: db,
-            builder: (c, _) => SwitchListTile(
-              secondary: const Icon(Icons.fingerprint),
-              title: const Text('الدخول بالبصمة / الوجه'),
-              value: db.me?['bio'] == true,
-              onChanged: (v) async {
-                if (v && !await deviceAuth(c, true)) return;
-                db.me?['bio'] = v;
-                db.save();
-              },
-            ),
-          ),
           ListTile(
             leading: const Icon(Icons.logout, color: Colors.red),
             title: const Text('تسجيل الخروج'),
             onTap: () => db.logout(),
           ),
+          const SizedBox(height: 24),
         ]),
       );
 }
@@ -803,6 +792,21 @@ class Dash extends StatelessWidget {
   String cmp(double a, double b) =>
       b == 0 ? '-' : '${a >= b ? '▲' : '▼'} ${f(((a - b) / b * 100).abs())}%';
 
+  Widget big(String t, double v, IconData i, Color col, {String? sub, Color? subColor}) =>
+      Expanded(
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(children: [
+              Icon(i, color: col),
+              Text(t),
+              Text(f(v), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              if (sub != null) Text(sub, style: TextStyle(fontSize: 12, color: subColor)),
+            ]),
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
         listenable: db,
@@ -828,8 +832,6 @@ class Dash extends StatelessWidget {
           final debts = db.customers.fold<double>(0, (a, e) => a + n(e['debt']));
           final act = db.products.where((p) => p['archived'] != true).toList();
           final stock = act.fold<double>(0, (a, e) => a + n(e['cost']) * n(e['qty']));
-          final sellVal = act.fold<double>(0, (a, e) => a + n(e['price']) * n(e['qty']));
-          final units = act.fold<double>(0, (a, e) => a + n(e['qty']));
           final low = act
               .where((p) => n(p['qty']) <= (p['min'] == null ? 2 : n(p['min'])))
               .toList();
@@ -843,8 +845,8 @@ class Dash extends StatelessWidget {
           final stale = db.lastBackup == null
               ? db.sales.isNotEmpty
               : now.difference(DateTime.parse(db.lastBackup!)).inDays >= 7;
+          final hasAttn = low.isNotEmpty || overdue.isNotEmpty || ready.isNotEmpty || stale;
           final cards = <(String, double, IconData, Color)>[
-            ('ربح اليوم', tp, Icons.trending_up, Colors.green),
             ('إجمالي المبيعات', sales, Icons.shopping_cart, Colors.indigo),
             ('إجمالي الربح', profit, Icons.savings, Colors.teal),
             ('دخل الصيانة', rep, Icons.build, Colors.orange),
@@ -852,15 +854,50 @@ class Dash extends StatelessWidget {
             ('صافي الربح', profit + rep - exp, Icons.account_balance, Colors.purple),
             ('ديون العملاء', debts, Icons.warning, Colors.deepOrange),
           ];
+          final attn = Card(
+            color: Theme.of(c).colorScheme.tertiaryContainer,
+            child: Column(children: [
+              const ListTile(
+                  leading: Icon(Icons.notifications_active, color: Colors.orange),
+                  title: Text('يحتاج انتباه')),
+              if (!hasAttn)
+                const ListTile(dense: true, title: Text('لا شيء يحتاج انتباه حالياً ✅')),
+              if (stale)
+                ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.backup, color: Colors.orange),
+                    title: Text(db.lastBackup == null
+                        ? 'لم تأخذ نسخة احتياطية بعد'
+                        : 'مرّ 7 أيام أو أكثر على آخر نسخة احتياطية'),
+                    subtitle: const Text('المزيد ← نسخ احتياطي')),
+              for (final p in low)
+                ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.inventory_2, color: Colors.red),
+                    title: Text('مخزون منخفض: ${p['name']}'),
+                    trailing: Text(f(n(p['qty'])))),
+              for (final x in overdue)
+                ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.warning, color: Colors.deepOrange),
+                    title: Text('دين متأخر: ${x['name']}'),
+                    trailing: Text(f(n(x['debt'])))),
+              for (final r in ready)
+                ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.build_circle, color: Colors.green),
+                    title: Text('صيانة جاهزة للتسليم: ${r['device']}'),
+                    trailing: Text('${r['customer']}'),
+                    onTap: () => Navigator.push(
+                        c, MaterialPageRoute(builder: (_) => const RepairsPage()))),
+            ]),
+          );
           return Scaffold(
             appBar: AppBar(title: const Text('Al Itqan Store')),
             body: ListView(padding: const EdgeInsets.all(8), children: [
               SizedBox(
-                height: 52,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1A237E),
-                      foregroundColor: Colors.white),
+                height: 54,
+                child: FilledButton.icon(
                   onPressed: () => goto.value = 2,
                   icon: const Icon(Icons.point_of_sale),
                   label: const Text('بيع جديد', style: TextStyle(fontSize: 18)),
@@ -868,6 +905,7 @@ class Dash extends StatelessWidget {
               ),
               Wrap(spacing: 8, children: [
                 for (final q in <(String, IconData, Widget)>[
+                  ('الصيانة', Icons.build, const RepairsPage()),
                   ('المصروفات', Icons.money_off, const ExpensesPage()),
                   ('سجل المبيعات', Icons.receipt_long, const SalesPage()),
                   ('التقارير', Icons.bar_chart, const ReportsPage()),
@@ -880,11 +918,27 @@ class Dash extends StatelessWidget {
                         c, MaterialPageRoute(builder: (_) => q.$3)),
                   ),
               ]),
+              if (hasAttn) attn,
+              Row(children: [
+                big('مبيعات اليوم', days[6], Icons.today, Colors.blue,
+                    sub: 'عن أمس ${cmp(days[6], days[5])}',
+                    subColor: days[6] >= days[5] ? Colors.green : Colors.red),
+                big('ربح اليوم', tp, Icons.trending_up, Colors.green),
+              ]),
+              Card(
+                color: Theme.of(c).colorScheme.primaryContainer,
+                child: ListTile(
+                  leading: const Icon(Icons.inventory, color: Colors.indigo),
+                  title: const Text('رأس المال (المخزون بسعر الشراء)'),
+                  subtitle: const Text('اضغط للتفاصيل ورأس المال المباع'),
+                  trailing: Text(f(stock),
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  onTap: () => showDialog<void>(
+                      context: c, builder: (d) => const CapitalDialog()),
+                ),
+              ),
               Card(
                 child: Column(children: [
-                  row('مبيعات اليوم', f(days[6])),
-                  row('مقارنة بأمس', cmp(days[6], days[5]),
-                      c: days[6] >= days[5] ? Colors.green : Colors.red),
                   row('مقارنة بنفس اليوم الأسبوع الماضي', cmp(days[6], lw),
                       c: days[6] >= lw ? Colors.green : Colors.red),
                   Padding(
@@ -900,7 +954,9 @@ class Dash extends StatelessWidget {
                                 margin: const EdgeInsets.symmetric(horizontal: 4),
                                 height: mx == 0 ? 2 : 2 + days[i] / mx * 70,
                                 decoration: BoxDecoration(
-                                    color: i == 6 ? Colors.indigo : Colors.indigo.shade200,
+                                    color: i == 6
+                                        ? Theme.of(c).colorScheme.primary
+                                        : Theme.of(c).colorScheme.primary.withOpacity(0.35),
                                     borderRadius: BorderRadius.circular(4)),
                               ),
                               Text(ds(today.subtract(Duration(days: 6 - i))).substring(8),
@@ -911,34 +967,6 @@ class Dash extends StatelessWidget {
                     ),
                   ),
                 ]),
-              ),
-              Card(
-                color: Colors.indigo.shade50,
-                child: ListTile(
-                  leading: const Icon(Icons.inventory, color: Colors.indigo),
-                  title: const Text('رأس المال (المخزون بسعر الشراء)'),
-                  subtitle: const Text('اضغط لعرض إجمالي سعر البيع'),
-                  trailing: Text(f(stock),
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  onTap: () => showDialog<void>(
-                    context: c,
-                    builder: (d) => AlertDialog(
-                      title: const Text('رأس المال والمخزون'),
-                      content: SizedBox(
-                        width: double.maxFinite,
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          row('إجمالي رأس المال (سعر الشراء)', f(stock)),
-                          row('إجمالي سعر بيع المنتجات', f(sellVal), c: Colors.indigo),
-                          row('الربح المتوقع إذا بيع كله', f(sellVal - stock), c: Colors.green),
-                          row('عدد القطع في المخزون', f(units)),
-                        ]),
-                      ),
-                      actions: [
-                        TextButton(onPressed: () => Navigator.pop(d), child: const Text('إغلاق'))
-                      ],
-                    ),
-                  ),
-                ),
               ),
               GridView.count(
                 crossAxisCount: 2,
@@ -962,42 +990,7 @@ class Dash extends StatelessWidget {
                     ),
                 ],
               ),
-              Card(
-                color: Colors.amber.shade50,
-                child: Column(children: [
-                  const ListTile(
-                      leading: Icon(Icons.notifications_active, color: Colors.orange),
-                      title: Text('يحتاج انتباه')),
-                  if (low.isEmpty && overdue.isEmpty && ready.isEmpty && !stale)
-                    const ListTile(dense: true, title: Text('لا شيء يحتاج انتباه حالياً ✅')),
-                  if (stale)
-                    ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.backup, color: Colors.orange),
-                        title: Text(db.lastBackup == null
-                            ? 'لم تأخذ نسخة احتياطية بعد'
-                            : 'مرّ 7 أيام أو أكثر على آخر نسخة احتياطية'),
-                        subtitle: const Text('المزيد ← نسخ احتياطي')),
-                  for (final p in low)
-                    ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.inventory_2, color: Colors.red),
-                        title: Text('مخزون منخفض: ${p['name']}'),
-                        trailing: Text('${f(n(p['qty']))}')),
-                  for (final x in overdue)
-                    ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.warning, color: Colors.deepOrange),
-                        title: Text('دين متأخر: ${x['name']}'),
-                        trailing: Text(f(n(x['debt'])))),
-                  for (final r in ready)
-                    ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.build_circle, color: Colors.green),
-                        title: Text('صيانة جاهزة للتسليم: ${r['device']}'),
-                        trailing: Text('${r['customer']}')),
-                ]),
-              ),
+              if (!hasAttn) attn,
             ]),
           );
         },
@@ -1358,7 +1351,7 @@ class _PosState extends State<PosPage> {
                       ]),
               ),
               Container(
-                color: Colors.indigo.shade50,
+                color: Theme.of(context).colorScheme.primaryContainer,
                 padding: const EdgeInsets.all(12),
                 child: Row(children: [
                   Expanded(
@@ -2397,6 +2390,117 @@ class _InvState extends State<InventoryPage> {
           child: ElevatedButton(onPressed: apply, child: const Text('اعتماد الجرد')),
         ),
       ]),
+    );
+  }
+}
+
+class CapitalDialog extends StatefulWidget {
+  const CapitalDialog({super.key});
+  @override
+  State<CapitalDialog> createState() => _CapState();
+}
+
+class _CapState extends State<CapitalDialog> {
+  int mode = 0;
+  DateTime? from;
+  DateTime? to;
+  static const labels = ['الكل (من أول بيع)', 'اليوم', 'آخر 7 أيام', 'هذا الشهر'];
+
+  void setMode(int m) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    mode = m;
+    if (m == 0) {
+      from = null;
+      to = null;
+    } else {
+      to = today;
+      from = m == 1
+          ? today
+          : m == 2
+              ? today.subtract(const Duration(days: 6))
+              : DateTime(now.year, now.month, 1);
+    }
+  }
+
+  Future<void> pick() async {
+    final r = await showDateRangePicker(
+        context: context,
+        firstDate: DateTime(2020),
+        lastDate: DateTime.now().add(const Duration(days: 1)));
+    if (r == null) return;
+    setState(() {
+      mode = 4;
+      from = DateTime(r.start.year, r.start.month, r.start.day);
+      to = DateTime(r.end.year, r.end.month, r.end.day);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final act = db.products.where((p) => p['archived'] != true).toList();
+    final stock = act.fold<double>(0, (a, e) => a + n(e['cost']) * n(e['qty']));
+    final sellVal = act.fold<double>(0, (a, e) => a + n(e['price']) * n(e['qty']));
+    final units = act.fold<double>(0, (a, e) => a + n(e['qty']));
+    final end = to?.add(const Duration(days: 1));
+    double sales = 0, cost = 0, qty = 0;
+    int cnt = 0;
+    DateTime? first;
+    for (final s in db.sales) {
+      final d = DateTime.parse(s['date'] as String);
+      if (first == null || d.isBefore(first)) first = d;
+      if (from != null && d.isBefore(from!)) continue;
+      if (end != null && !d.isBefore(end)) continue;
+      cnt++;
+      sales += n(s['total']);
+      for (final i in s['items'] as List) {
+        cost += n(i['cost']) * n(i['qty']);
+        qty += n(i['qty']);
+      }
+    }
+    final period = mode == 0
+        ? (first == null ? 'لا توجد مبيعات بعد' : 'من أول بيع: ${ds(first)}')
+        : 'من ${ds(from!)} إلى ${ds(to!)}';
+    return AlertDialog(
+      title: const Text('رأس المال والمخزون'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Wrap(spacing: 6, children: [
+              for (var i = 0; i < 4; i++)
+                ChoiceChip(
+                    label: Text(labels[i]),
+                    selected: mode == i,
+                    onSelected: (_) => setState(() => setMode(i))),
+              ChoiceChip(
+                  label: const Text('مخصص'),
+                  selected: mode == 4,
+                  onSelected: (_) => pick()),
+            ]),
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Text(period, style: const TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            const Divider(),
+            const Text('المبيعات في الفترة', style: TextStyle(color: Colors.grey)),
+            row('عدد الفواتير', '$cnt'),
+            row('القطع المباعة', f(qty)),
+            row('رأس المال المباع (تكلفة القطع)', f(cost), c: Colors.orange),
+            row('إجمالي المبيعات', f(sales)),
+            row('صافي الربح (المبيعات − رأس المال المباع)', f(sales - cost), c: Colors.green),
+            const Divider(),
+            const Text('المخزون الآن (لا يتغير بالفترة)', style: TextStyle(color: Colors.grey)),
+            row('رأس المال المتبقي (سعر الشراء)', f(stock)),
+            row('إجمالي سعر بيع المتبقي', f(sellVal), c: Colors.indigo),
+            row('الربح المتوقع من المتبقي', f(sellVal - stock), c: Colors.green),
+            row('عدد القطع المتبقية', f(units)),
+          ]),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق'))
+      ],
     );
   }
 }
