@@ -18,14 +18,20 @@ typedef M = Map<String, dynamic>;
 double n(dynamic v) => v is num ? v.toDouble() : 0.0;
 double pd(String s) => double.tryParse(s.replaceAll(',', '').trim()) ?? 0.0;
 String f(num v) => v.toStringAsFixed(v % 1 == 0 ? 0 : 2);
-int nid() => DateTime.now().microsecondsSinceEpoch;
+int _lastId = 0;
+int nid() {
+  var t = DateTime.now().microsecondsSinceEpoch;
+  if (t <= _lastId) t = _lastId + 1;
+  _lastId = t;
+  return t;
+}
 String newCode() =>
     (DateTime.now().millisecondsSinceEpoch % 1000000000000).toString().padLeft(12, '0');
 
 class Db extends ChangeNotifier {
   static final Db i = Db._();
   Db._();
-  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings', 'logs', 'returns', 'payments'];
+  static const keys = ['products', 'customers', 'sales', 'repairs', 'expenses', 'users', 'suppliers', 'purchases', 'closings', 'logs', 'returns', 'payments', 'moves'];
   final Map<String, List<M>> t = {for (final k in keys) k: <M>[]};
   SharedPreferences? p;
   M? me;
@@ -41,6 +47,21 @@ class Db extends ChangeNotifier {
   List<M> get logs => t['logs']!;
   List<M> get returns => t['returns']!;
   List<M> get payments => t['payments']!;
+  List<M> get moves => t['moves']!;
+  void move(M p, String type, num delta, [String note = '']) {
+    moves.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'pid': p['id'],
+      'name': p['name'],
+      'type': type,
+      'delta': delta,
+      'after': n(p['qty']),
+      'by': me?['name'] ?? '-',
+      'note': note
+    });
+    if (moves.length > 3000) moves.removeAt(0);
+  }
   String? lastBackup;
   void log(String x) {
     logs.add({'id': nid(), 'date': DateTime.now().toIso8601String(), 'by': me?['name'] ?? '-', 'text': x});
@@ -546,6 +567,24 @@ class MorePage extends StatelessWidget {
           ),
           if (isAdmin) ...[
             ListTile(
+              leading: const Icon(Icons.fact_check),
+              title: const Text('الجرد الدوري'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const InventoryPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.swap_vert),
+              title: const Text('حركات المخزون'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const MovesPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.archive),
+              title: const Text('الأرشيف (منتجات وعملاء)'),
+              onTap: () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => const ArchivePage())),
+            ),
+            ListTile(
               leading: const Icon(Icons.history_edu),
               title: const Text('سجل العمليات'),
               onTap: () => Navigator.push(
@@ -787,9 +826,11 @@ class Dash extends StatelessWidget {
               .where((r) => n(r['status']) == 2)
               .fold<double>(0, (a, r) => a + n(r['cost']));
           final debts = db.customers.fold<double>(0, (a, e) => a + n(e['debt']));
-          final stock = db.products
-              .fold<double>(0, (a, e) => a + n(e['cost']) * n(e['qty']));
-          final low = db.products
+          final act = db.products.where((p) => p['archived'] != true).toList();
+          final stock = act.fold<double>(0, (a, e) => a + n(e['cost']) * n(e['qty']));
+          final sellVal = act.fold<double>(0, (a, e) => a + n(e['price']) * n(e['qty']));
+          final units = act.fold<double>(0, (a, e) => a + n(e['qty']));
+          final low = act
               .where((p) => n(p['qty']) <= (p['min'] == null ? 2 : n(p['min'])))
               .toList();
           final overdue = db.customers
@@ -810,7 +851,6 @@ class Dash extends StatelessWidget {
             ('المصروفات', exp, Icons.money_off, Colors.red),
             ('صافي الربح', profit + rep - exp, Icons.account_balance, Colors.purple),
             ('ديون العملاء', debts, Icons.warning, Colors.deepOrange),
-            ('قيمة المخزون', stock, Icons.inventory, Colors.brown),
           ];
           return Scaffold(
             appBar: AppBar(title: const Text('Al Itqan Store')),
@@ -871,6 +911,34 @@ class Dash extends StatelessWidget {
                     ),
                   ),
                 ]),
+              ),
+              Card(
+                color: Colors.indigo.shade50,
+                child: ListTile(
+                  leading: const Icon(Icons.inventory, color: Colors.indigo),
+                  title: const Text('رأس المال (المخزون بسعر الشراء)'),
+                  subtitle: const Text('اضغط لعرض إجمالي سعر البيع'),
+                  trailing: Text(f(stock),
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  onTap: () => showDialog<void>(
+                    context: c,
+                    builder: (d) => AlertDialog(
+                      title: const Text('رأس المال والمخزون'),
+                      content: SizedBox(
+                        width: double.maxFinite,
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          row('إجمالي رأس المال (سعر الشراء)', f(stock)),
+                          row('إجمالي سعر بيع المنتجات', f(sellVal), c: Colors.indigo),
+                          row('الربح المتوقع إذا بيع كله', f(sellVal - stock), c: Colors.green),
+                          row('عدد القطع في المخزون', f(units)),
+                        ]),
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(d), child: const Text('إغلاق'))
+                      ],
+                    ),
+                  ),
+                ),
               ),
               GridView.count(
                 crossAxisCount: 2,
@@ -966,12 +1034,15 @@ class _ProductsState extends State<ProductsPage> {
     );
     if (r == null || r[0].isEmpty) return;
     final m = p ?? <String, dynamic>{'id': nid()};
+    final oldQty = n(m['qty']).toInt();
     m['name'] = r[0];
     m['cat'] = r[1];
     m['imei'] = r[2].isEmpty ? newCode() : r[2];
     m['cost'] = pd(r[3]);
     m['price'] = pd(r[4]);
     m['qty'] = pd(r[5]).toInt();
+    final dq = (m['qty'] as int) - oldQty;
+    if (dq != 0) db.move(m, p == null ? 'رصيد افتتاحي' : 'تعديل يدوي', dq);
     m['min'] = r[6].isEmpty ? 2 : pd(r[6]).toInt();
     if (p == null) db.products.add(m);
     db.save();
@@ -987,7 +1058,7 @@ class _ProductsState extends State<ProductsPage> {
         listenable: db,
         builder: (c, _) {
           final list = db.products
-              .where((p) => '${p['name']} ${p['imei']} ${p['cat']}'
+              .where((p) => p['archived'] != true && '${p['name']} ${p['imei']} ${p['cat']}'
                   .toLowerCase()
                   .contains(q.toLowerCase()))
               .toList();
@@ -1034,9 +1105,9 @@ class _ProductsState extends State<ProductsPage> {
                                     IconButton(
                                       icon: const Icon(Icons.delete, color: Colors.red),
                                       onPressed: () async {
-                                        if (await sure(c)) {
-                                          db.log('حذف منتج ${p['name']}');
-                                          db.products.remove(p);
+                                        if (await ask(c, 'أرشفة المنتج؟ يختفي من القوائم ويمكن استرجاعه من المزيد ← الأرشيف')) {
+                                          db.log('أرشفة منتج ${p['name']}');
+                                          p['archived'] = true;
                                           db.save();
                                         }
                                       },
@@ -1073,7 +1144,7 @@ class _PosState extends State<PosPage> {
   void addByCode(String v) {
     final code = v.trim();
     if (code.isEmpty) return;
-    final l = db.products.where((p) => '${p['imei']}' == code).toList();
+    final l = db.products.where((p) => p['archived'] != true && '${p['imei']}' == code).toList();
     if (l.isEmpty) {
       msg(context, 'لا يوجد منتج بهذا الباركود');
       return;
@@ -1106,7 +1177,7 @@ class _PosState extends State<PosPage> {
                 value: cid,
                 items: [
                   const DropdownMenuItem<int?>(value: null, child: Text('عميل نقدي')),
-                  for (final cu in db.customers)
+                  for (final cu in db.customers.where((x) => x['archived'] != true))
                     DropdownMenuItem<int?>(
                         value: cu['id'] as int, child: Text('${cu['name']}')),
                 ],
@@ -1167,6 +1238,7 @@ class _PosState extends State<PosPage> {
         'cost': n(p['cost'])
       });
       p['qty'] = n(p['qty']).toInt() - e.value;
+      db.move(p, 'بيع', -e.value);
     }
     String cname = 'عميل نقدي';
     if (cid != null) {
@@ -1207,7 +1279,7 @@ class _PosState extends State<PosPage> {
           cart.removeWhere((id, _) => !db.products.any((p) => p['id'] == id));
           final list = db.products
               .where((p) =>
-                  n(p['qty']) > 0 &&
+                  p['archived'] != true && n(p['qty']) > 0 &&
                   '${p['name']} ${p['imei']}'
                       .toLowerCase()
                       .contains(q.toLowerCase()))
@@ -1307,6 +1379,95 @@ class _PosState extends State<PosPage> {
 class SalesPage extends StatelessWidget {
   const SalesPage({super.key});
 
+  void custDebt(M s, double amt) {
+    if (s['cid'] == null || amt <= 0) return;
+    final l = db.customers.where((x) => x['id'] == s['cid']).toList();
+    if (l.isNotEmpty) {
+      final left = n(l.first['debt']) - amt;
+      l.first['debt'] = left < 0 ? 0.0 : left;
+    }
+  }
+
+  Future<void> partialReturn(BuildContext c, M s) async {
+    final items = (s['items'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    final cs = [for (final _ in items) TextEditingController()];
+    final ok = await showDialog<bool>(
+      context: c,
+      builder: (d) => AlertDialog(
+        title: const Text('مرتجع جزئي: الكمية المرجعة'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (var i = 0; i < items.length; i++)
+              TextField(
+                controller: cs[i],
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                    labelText: '${items[i]['name']} (المباع ${items[i]['qty']})'),
+              ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('إلغاء')),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: const Text('تأكيد المرتجع')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final total0 = items.fold<double>(0, (a, i) => a + n(i['price']) * n(i['qty']));
+    double v = 0, margin = 0;
+    final back = <M>[];
+    for (var i = 0; i < items.length; i++) {
+      final sold = n(items[i]['qty']).toInt();
+      var q = pd(cs[i].text).toInt();
+      if (q > sold) q = sold;
+      if (q <= 0) continue;
+      v += n(items[i]['price']) * q;
+      margin += (n(items[i]['price']) - n(items[i]['cost'])) * q;
+      back.add({...items[i], 'qty': q});
+      items[i]['qty'] = sold - q;
+      final l = db.products
+          .where((p) => p['id'] == items[i]['pid'] || (items[i]['pid'] == null && p['name'] == items[i]['name']))
+          .toList();
+      if (l.isNotEmpty) {
+        l.first['qty'] = n(l.first['qty']).toInt() + q;
+        db.move(l.first, 'مرتجع جزئي', q);
+      }
+    }
+    if (back.isEmpty) return;
+    final ratio = total0 == 0 ? 0.0 : v / total0;
+    final dsc = n(s['discount']);
+    final refund = (total0 - dsc) * ratio;
+    final lost = margin - dsc * ratio;
+    items.removeWhere((i) => n(i['qty']) <= 0);
+    db.returns.add({
+      'id': nid(),
+      'date': DateTime.now().toIso8601String(),
+      'no': s['no'],
+      'customer': s['customer'],
+      'total': refund,
+      'profit': lost,
+      'by': db.me?['name'],
+      'items': back,
+      'partial': true,
+    });
+    db.log('مرتجع جزئي من فاتورة ${s['no'] ?? ''} بقيمة ${f(refund)}');
+    if (items.isEmpty) {
+      custDebt(s, n(s['debt']));
+      db.sales.remove(s);
+    } else {
+      final debt = n(s['debt']);
+      final fromDebt = refund < debt ? refund : debt;
+      s['items'] = items;
+      s['total'] = n(s['total']) - refund;
+      s['discount'] = dsc - dsc * ratio;
+      s['profit'] = n(s['profit']) - lost;
+      s['debt'] = debt - fromDebt;
+      s['paid'] = n(s['paid']) - (refund - fromDebt);
+      custDebt(s, fromDebt);
+    }
+    db.save();
+  }
+
   Future<void> returnSale(BuildContext c, M s) async {
     if (!await ask(c, 'إرجاع الفاتورة بالكامل؟ ستعود الكميات للمخزون')) return;
     for (final i in s['items'] as List) {
@@ -1316,6 +1477,7 @@ class SalesPage extends StatelessWidget {
           .toList();
       if (l.isNotEmpty) {
         l.first['qty'] = n(l.first['qty']).toInt() + n(i['qty']).toInt();
+        db.move(l.first, 'مرتجع', n(i['qty']).toInt());
       }
     }
     if (s['cid'] != null) {
@@ -1369,6 +1531,13 @@ class SalesPage extends StatelessWidget {
                                     .join('\n') +
                                 '\n\nالخصم: ${f(n(s['discount']))}\nالإجمالي: ${f(n(s['total']))}\nالمدفوع: ${f(n(s['paid']))}\nالمتبقي: ${f(n(s['debt']))}'),
                             actions: [
+                              if (isAdmin)
+                                TextButton(
+                                    onPressed: () {
+                                      Navigator.pop(d);
+                                      partialReturn(c, s);
+                                    },
+                                    child: const Text('مرتجع جزئي')),
                               if (isAdmin)
                                 TextButton(
                                     onPressed: () {
@@ -1438,7 +1607,7 @@ class CustomersPage extends StatelessWidget {
           body: db.customers.isEmpty
               ? empty()
               : ListView(children: [
-                  for (final m in db.customers)
+                  for (final m in db.customers.where((x) => x['archived'] != true))
                     ListTile(
                       leading: const CircleAvatar(child: Icon(Icons.person)),
                       title: Text('${m['name']}'),
@@ -1454,9 +1623,11 @@ class CustomersPage extends StatelessWidget {
                           IconButton(
                             icon: const Icon(Icons.delete, color: Colors.red),
                             onPressed: () async {
-                              if (await sure(c)) {
-                                db.log('حذف عميل ${m['name']}');
-                                db.customers.remove(m);
+                              if (n(m['debt']) > 0) {
+                                msg(c, 'لا يمكن أرشفة عميل عليه دين');
+                              } else if (await ask(c, 'أرشفة العميل؟ يمكن استرجاعه من المزيد ← الأرشيف')) {
+                                db.log('أرشفة عميل ${m['name']}');
+                                m['archived'] = true;
                                 db.save();
                               }
                             },
@@ -1643,7 +1814,7 @@ class SuppliersPage extends StatelessWidget {
       return;
     }
     int? sid = db.suppliers.first['id'] as int;
-    int? pid = db.products.first['id'] as int;
+    int? pid = db.products.firstWhere((x) => x['archived'] != true, orElse: () => db.products.first)['id'] as int;
     final qc = TextEditingController();
     final cc = TextEditingController();
     final pc = TextEditingController();
@@ -1668,7 +1839,7 @@ class SuppliersPage extends StatelessWidget {
                 isExpanded: true,
                 value: pid,
                 items: [
-                  for (final p in db.products)
+                  for (final p in db.products.where((x) => x['archived'] != true))
                     DropdownMenuItem<int?>(
                         value: p['id'] as int, child: Text('${p['name']}'))
                 ],
@@ -1710,6 +1881,7 @@ class SuppliersPage extends StatelessWidget {
     var paid = pc.text.trim().isEmpty ? total : pd(pc.text);
     if (paid > total) paid = total;
     p['qty'] = n(p['qty']).toInt() + q;
+    db.move(p, 'شراء', q);
     p['cost'] = cost;
     sup['debt'] = n(sup['debt']) + (total - paid);
     db.purchases.add({
@@ -2051,6 +2223,180 @@ class LogsPage extends StatelessWidget {
                       '${l['by']} • ${(l['date'] as String).substring(0, 16).replaceFirst('T', ' ')}'),
                 ),
             ]),
+    );
+  }
+}
+
+class MovesPage extends StatelessWidget {
+  const MovesPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final list = db.moves.reversed.take(300).toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('حركات المخزون')),
+      body: list.isEmpty
+          ? empty()
+          : ListView(children: [
+              for (final m in list)
+                ListTile(
+                  dense: true,
+                  title: Text('${m['name']} • ${m['type']}'),
+                  subtitle: Text(
+                      '${(m['date'] as String).substring(0, 16).replaceFirst('T', ' ')} • ${m['by']} • الرصيد بعد: ${f(n(m['after']))}'),
+                  trailing: Text(
+                    '${n(m['delta']) > 0 ? '+' : ''}${f(n(m['delta']))}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: n(m['delta']) < 0 ? Colors.red : Colors.green),
+                  ),
+                ),
+            ]),
+    );
+  }
+}
+
+class ArchivePage extends StatelessWidget {
+  const ArchivePage({super.key});
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: db,
+        builder: (c, _) {
+          final ps = db.products.where((x) => x['archived'] == true).toList();
+          final cu = db.customers.where((x) => x['archived'] == true).toList();
+          return Scaffold(
+            appBar: AppBar(title: const Text('الأرشيف')),
+            body: ps.isEmpty && cu.isEmpty
+                ? empty()
+                : ListView(children: [
+                    for (final x in ps)
+                      ListTile(
+                        leading: const Icon(Icons.phone_android),
+                        title: Text('${x['name']}'),
+                        subtitle: Text('منتج • الكمية ${f(n(x['qty']))}'),
+                        trailing: TextButton(
+                            onPressed: () {
+                              x.remove('archived');
+                              db.log('استرجاع منتج ${x['name']}');
+                              db.save();
+                            },
+                            child: const Text('استرجاع')),
+                      ),
+                    for (final x in cu)
+                      ListTile(
+                        leading: const Icon(Icons.person),
+                        title: Text('${x['name']}'),
+                        subtitle: const Text('عميل'),
+                        trailing: TextButton(
+                            onPressed: () {
+                              x.remove('archived');
+                              db.log('استرجاع عميل ${x['name']}');
+                              db.save();
+                            },
+                            child: const Text('استرجاع')),
+                      ),
+                  ]),
+          );
+        },
+      );
+}
+
+class InventoryPage extends StatefulWidget {
+  const InventoryPage({super.key});
+  @override
+  State<InventoryPage> createState() => _InvState();
+}
+
+class _InvState extends State<InventoryPage> {
+  final cs = <int, TextEditingController>{};
+  String q = '';
+
+  TextEditingController ctl(int id) =>
+      cs.putIfAbsent(id, () => TextEditingController());
+
+  Future<void> apply() async {
+    if (!await ask(context, 'اعتماد الجرد وتعديل الكميات في النظام؟')) return;
+    final diffs = <String>[];
+    double val = 0;
+    for (final p in db.products.where((x) => x['archived'] != true)) {
+      final t = ctl(p['id'] as int).text.trim();
+      if (t.isEmpty) continue;
+      final cnt = pd(t).toInt();
+      final sys = n(p['qty']).toInt();
+      if (cnt == sys) continue;
+      diffs.add('${p['name']}: النظام $sys ← الفعلي $cnt');
+      val += (cnt - sys) * n(p['cost']);
+      p['qty'] = cnt;
+      db.move(p, 'جرد', cnt - sys, 'تسوية جرد');
+    }
+    if (!mounted) return;
+    if (diffs.isEmpty) {
+      msg(context, 'لا توجد فروقات في المنتجات المُدخلة');
+      return;
+    }
+    db.log('اعتماد جرد: ${diffs.length} فروقات بقيمة ${f(val)}');
+    db.save();
+    for (final x in cs.values) {
+      x.clear();
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text('نتيجة الجرد (${diffs.length} فروقات)'),
+        content: SingleChildScrollView(
+            child: Text('${diffs.join('\n')}\n\nفرق القيمة بسعر الشراء: ${f(val)}')),
+        actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('إغلاق'))],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final list = db.products
+        .where((p) =>
+            p['archived'] != true &&
+            '${p['name']} ${p['imei']}'.toLowerCase().contains(q.toLowerCase()))
+        .toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('الجرد الدوري')),
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: TextField(
+            decoration: const InputDecoration(
+                prefixIcon: Icon(Icons.search),
+                hintText: 'بحث بالاسم أو الباركود',
+                border: OutlineInputBorder()),
+            onChanged: (v) => setState(() => q = v),
+          ),
+        ),
+        const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Text('أدخل الكمية الفعلية للمنتجات التي عددتها فقط، واترك الباقي فارغاً.')),
+        Expanded(
+          child: list.isEmpty
+              ? empty()
+              : ListView(children: [
+                  for (final p in list)
+                    ListTile(
+                      title: Text('${p['name']}'),
+                      subtitle: Text('النظام: ${f(n(p['qty']))}'),
+                      trailing: SizedBox(
+                        width: 90,
+                        child: TextField(
+                          controller: ctl(p['id'] as int),
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(hintText: 'الفعلي'),
+                        ),
+                      ),
+                    ),
+                ]),
+        ),
+        Container(
+          padding: const EdgeInsets.all(12),
+          width: double.infinity,
+          child: ElevatedButton(onPressed: apply, child: const Text('اعتماد الجرد')),
+        ),
+      ]),
     );
   }
 }
